@@ -1,0 +1,21 @@
+[package]
+name = "sympoie"
+description = "Audio engine, project model and file formats of the Sympoie workstation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = ["native-pitch"]
+native-pitch = ["dep:sympoie-signalsmith-pitch", "dep:sympoie-rubberband-pitch"]
+
+[dependencies]
+sympoie-signalsmith-pitch = { path = "../../vendor/signalsmith-pitch", optional = true }
+sympoie-rubberband-pitch = { path = "../../vendor/rubberband-pitch", optional = true }
+
+[lints]
+workspace = true

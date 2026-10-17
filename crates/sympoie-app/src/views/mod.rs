@@ -1,0 +1,12 @@
+pub mod arrangement;
+pub mod browser;
+mod browser_folders;
+pub mod builtin_devices;
+pub mod clip_view;
+pub mod device_drag;
+pub mod devices;
+pub mod mixer;
+pub mod piano_roll;
+pub mod plugin_browser;
+pub mod track_controls;
+pub mod transport_bar;

@@ -1,0 +1,13 @@
+[package]
+name = "sympoie-rubberband-pitch"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "GPL-2.0-or-later"
+description = "Vendored Rubber Band R3 pitch processing for Sympoie"
+
+[build-dependencies]
+cc = "1"
+
+[workspace]
+

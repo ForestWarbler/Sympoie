@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+members = ["crates/sympoie", "crates/sympoie-app"]
+default-members = ["crates/sympoie", "crates/sympoie-app"]
+exclude = ["vendor/vst3-host", "vendor/signalsmith-pitch", "vendor/rubberband-pitch"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "GPL-3.0-or-later"
+authors = ["ForestWarbler"]
+repository = "https://github.com/ForestWarbler/Sympoie"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+
+[profile.dev.package.sympoie]
+opt-level = 2
+
+# The GUI does its per-frame work (layout, text, tessellation, hashing) inside
+# egui, epaint and wgpu. Unoptimized, a project with a few thousand clips drops
+# a debug build to single-digit frame rates, so dependencies are optimized even
+# in dev. They compile once and stay cached; the app crate gets a light pass so
+# its drawing loops keep up while staying quick to rebuild.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.sympoie-app]
+opt-level = 1
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

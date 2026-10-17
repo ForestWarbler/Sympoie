@@ -1,0 +1,34 @@
+[package]
+name = "sympoie-app"
+description = "The Sympoie digital audio workstation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "sympoie"
+path = "src/main.rs"
+
+[features]
+default = ["audio-device"]
+audio-device = ["dep:cpal", "dep:midir"]
+glow = ["eframe/glow"]
+
+[dependencies]
+sympoie = { path = "../sympoie" }
+eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts", "wayland", "wgpu", "x11"] }
+rfd = "0.17.2"
+cpal = { version = "0.18.2", optional = true }
+midir = { version = "0.11", optional = true }
+crossbeam-queue = "0.3"
+vst3-host = { version = "0.10.0", path = "../../vendor/vst3-host", default-features = false, features = ["native-window-owner"] }
+raw-window-handle = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true
