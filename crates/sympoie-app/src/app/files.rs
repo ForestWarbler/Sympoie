@@ -234,6 +234,13 @@ impl SympoieApp {
                 return;
             }
         };
-        self.export = Some(ExportJob::start(project, path, start, frames));
+        let plugins = match self.plugins.prepare_offline(&project) {
+            Ok(plugins) => plugins,
+            Err(error) => {
+                self.error(format!("Couldn't prepare plugins for export: {error}"));
+                return;
+            }
+        };
+        self.export = Some(ExportJob::start(project, plugins, path, start, frames));
     }
 }

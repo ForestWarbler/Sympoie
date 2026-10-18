@@ -11,8 +11,11 @@ const BLOCK: usize = 4096;
 pub const MAX_FRAMES: u64 = 48_000 * 600;
 const MAX_SEGMENTS: usize = 128;
 
+/// Renders and measures a range on the calling (worker) thread. `plugins` must come from
+/// `PluginRuntime::prepare_offline` on the main thread, which also services and releases it.
 pub fn analyze(
     project: &Project,
+    plugins: &PluginRuntime,
     start_tick: u64,
     end_tick: u64,
     wav: Option<&Path>,
@@ -34,9 +37,8 @@ pub fn analyze(
     let _pitch = project
         .prepare_audio_pitch(|| false)
         .map_err(|error| error.to_string())?;
-    let plugins = PluginRuntime::new();
     let mut renderer =
-        Renderer::with_plugin_host(project, &*plugins).map_err(|error| error.to_string())?;
+        Renderer::with_plugin_host(project, plugins).map_err(|error| error.to_string())?;
 
     let bar = project.time_signature().ticks_per_bar();
     let first_bar = start_tick / bar;
@@ -81,7 +83,6 @@ pub fn analyze(
     let mut done = 0;
     let mut segment = 0;
     while done < frames {
-        plugins.service();
         let errors = plugins.take_errors();
         if !errors.is_empty() {
             return Err(errors.join("; "));

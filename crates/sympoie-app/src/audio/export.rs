@@ -29,7 +29,14 @@ pub struct ExportJob {
 }
 
 impl ExportJob {
-    pub fn start(project: Project, path: PathBuf, start_frame: u64, frames: u64) -> Self {
+    /// `plugins` must come from `PluginRuntime::prepare_offline` on the main thread.
+    pub fn start(
+        project: Project,
+        plugins: Arc<PluginRuntime>,
+        path: PathBuf,
+        start_frame: u64,
+        frames: u64,
+    ) -> Self {
         let progress = Arc::new(AtomicU64::new(0));
         let cancel = Arc::new(AtomicBool::new(false));
         let thread = {
@@ -37,7 +44,17 @@ impl ExportJob {
                 (Arc::clone(&progress), Arc::clone(&cancel), path.clone());
             thread::Builder::new()
                 .name("sympoie-export".into())
-                .spawn(move || export(&project, &path, start_frame, frames, &progress, &cancel))
+                .spawn(move || {
+                    export(
+                        &project,
+                        plugins,
+                        &path,
+                        start_frame,
+                        frames,
+                        &progress,
+                        &cancel,
+                    )
+                })
                 .expect("the operating system refused to start the export thread")
         };
         Self {
@@ -76,6 +93,7 @@ impl ExportJob {
 
 fn export(
     project: &Project,
+    plugins: Arc<PluginRuntime>,
     path: &Path,
     start_frame: u64,
     frames: u64,
@@ -86,7 +104,6 @@ fn export(
         .prepare_audio_pitch(|| cancel.load(Ordering::Relaxed))
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "export cancelled".to_owned())?;
-    let plugins = PluginRuntime::new();
     let mut renderer =
         Renderer::with_plugin_host(project, &*plugins).map_err(|error| error.to_string())?;
     export_renderer(
@@ -97,7 +114,6 @@ fn export(
         progress,
         cancel,
         || {
-            plugins.service();
             let errors = plugins.take_errors();
             if errors.is_empty() {
                 Ok(())
@@ -342,7 +358,8 @@ mod tests {
         let path = directory.join("mix.wav");
         fs::write(&path, b"old").unwrap();
 
-        let mut job = ExportJob::start(project, path.clone(), 100, 5000);
+        let plugins = PluginRuntime::new().prepare_offline(&project).unwrap();
+        let mut job = ExportJob::start(project, plugins, path.clone(), 100, 5000);
         let summary = loop {
             if let Some(result) = job.poll() {
                 break result.unwrap();

@@ -97,6 +97,7 @@ pub struct PluginRuntime {
     pending_edits: Mutex<Vec<(u64, u32, f64)>>,
     automated_parameters: Mutex<HashSet<(u64, u32)>>,
     retired: Mutex<Vec<LiveInstance>>,
+    offline: Mutex<Vec<Arc<PluginRuntime>>>,
     prepared_only: AtomicBool,
     state_dirty: AtomicBool,
 }
@@ -117,6 +118,7 @@ impl PluginRuntime {
             pending_edits: Mutex::new(Vec::new()),
             automated_parameters: Mutex::new(HashSet::new()),
             retired: Mutex::new(Vec::new()),
+            offline: Mutex::new(Vec::new()),
             prepared_only: AtomicBool::new(false),
             state_dirty: AtomicBool::new(false),
         })
@@ -179,6 +181,34 @@ impl PluginRuntime {
         } else {
             Err(failures.join("; "))
         }
+    }
+
+    /// Prepares a separate runtime for rendering `project` on a worker thread.
+    ///
+    /// VST3 plug-ins must be created, serviced and destroyed on the main thread, so call this
+    /// there. The worker may only process audio and read errors; this runtime keeps the other
+    /// one, services it and drops it in `service` once the worker has let go of it.
+    pub fn prepare_offline(
+        &self,
+        project: &sympoie::project::Project,
+    ) -> Result<Arc<PluginRuntime>, String> {
+        let runtime = PluginRuntime::new();
+        runtime.prepare_project(project)?;
+        self.offline
+            .lock()
+            .map_err(poisoned)?
+            .push(Arc::clone(&runtime));
+        Ok(runtime)
+    }
+
+    fn plugins_in_use(&self) -> bool {
+        self.live.lock().map_or(true, |live| {
+            live.values()
+                .any(|entry| Arc::strong_count(&entry.plugin) > 1)
+        }) || self
+            .retired
+            .lock()
+            .map_or(true, |retired| !retired.is_empty())
     }
 
     pub fn clear(&self) {
@@ -376,6 +406,14 @@ impl PluginRuntime {
 
     fn service_with_mode(&self, wait: bool) -> Result<(), String> {
         let automated = self.automated_parameters.lock().map_err(poisoned)?.clone();
+        let offline = {
+            let mut offline = self.offline.lock().map_err(poisoned)?;
+            offline.retain(|runtime| Arc::strong_count(runtime) > 1 || runtime.plugins_in_use());
+            offline.clone()
+        };
+        for runtime in offline {
+            runtime.service();
+        }
         self.retired
             .lock()
             .map_err(poisoned)?
@@ -654,7 +692,16 @@ fn poisoned<T>(_: std::sync::PoisonError<T>) -> String {
     "The plugin failed while holding its host lock".into()
 }
 
+#[cfg(test)]
+pub(crate) static LOAD_THREADS: Mutex<Vec<(std::path::PathBuf, std::thread::ThreadId)>> =
+    Mutex::new(Vec::new());
+
 fn load_plugin(descriptor: &PluginDescriptor) -> Result<Plugin, String> {
+    #[cfg(test)]
+    LOAD_THREADS
+        .lock()
+        .unwrap()
+        .push((descriptor.path.clone(), std::thread::current().id()));
     let mut host = Vst3Host::builder()
         .sample_rate(f64::from(SAMPLE_RATE))
         .block_size(BLOCK_SIZE)
@@ -1376,6 +1423,55 @@ mod tests {
         let error = runtime.load(&instance).unwrap_err();
         assert_eq!(error, "Plugin preparation failed");
         assert!(!runtime.has_instance(0));
+    }
+
+    #[test]
+    fn offline_runtimes_are_released_by_the_main_runtime_after_the_worker_lets_go() {
+        let main = PluginRuntime::new();
+        let mut project = sympoie::project::Project::new();
+        let track = project.add_midi_track("Synth");
+        project
+            .set_plugin_instrument(track, Some(BuiltinKind::Oscil.instance()))
+            .unwrap();
+        let offline = main.prepare_offline(&project).unwrap();
+        let watch = Arc::downgrade(&offline);
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let worker = thread::spawn(move || {
+            let renderer = sympoie::render::Renderer::with_plugin_host(&project, &*offline);
+            assert!(renderer.is_ok());
+            released.recv().unwrap();
+        });
+        main.service();
+        assert!(watch.upgrade().is_some());
+        release.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(
+            watch.upgrade().is_some(),
+            "only the main runtime may drop it"
+        );
+        main.service();
+        assert!(watch.upgrade().is_none());
+
+        let mut missing = sympoie::project::Project::new();
+        let track = missing.add_midi_track("External");
+        missing
+            .set_plugin_instrument(
+                track,
+                Some(PluginInstance::new(
+                    PluginDescriptor {
+                        path: PathBuf::from("does-not-exist.vst3"),
+                        class_id: "00000000000000000000000000000000".into(),
+                        name: "Missing".into(),
+                        vendor: String::new(),
+                        kind: PluginKind::Instrument,
+                    },
+                    Vec::new(),
+                    Vec::new(),
+                )),
+            )
+            .unwrap();
+        assert!(main.prepare_offline(&missing).is_err());
+        assert!(main.offline.lock().unwrap().is_empty());
     }
 
     #[test]

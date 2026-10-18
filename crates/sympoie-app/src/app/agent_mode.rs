@@ -262,15 +262,24 @@ impl SympoieApp {
                 match prepared {
                     Err(error) => responder.answer(Err(error)),
                     Ok((project, start, end, wav)) => {
+                        // Plug-ins are created here on the main thread; JUCE plug-ins crash
+                        // when instantiated on the analysis thread.
+                        let plugins = match self.plugins.prepare_offline(&project) {
+                            Ok(plugins) => plugins,
+                            Err(error) => return responder.answer(Err(error)),
+                        };
                         let spawned = std::thread::Builder::new()
                             .name("sympoie-analysis".into())
                             .spawn(move || {
                                 let result = crate::audio::analysis::analyze(
                                     &project,
+                                    &plugins,
                                     start,
                                     end,
                                     wav.as_deref(),
                                 );
+                                // The main thread releases the plug-ins once this lets go.
+                                drop(plugins);
                                 responder.answer(result.map(|mut value| {
                                     if let Some(path) = wav {
                                         value["saved_wav"] = json!(path.display().to_string());

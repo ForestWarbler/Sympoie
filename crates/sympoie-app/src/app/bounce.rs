@@ -37,7 +37,8 @@ impl SympoieApp {
                 .flat_map(track_plugin_ids)
                 .map(|id| (id, project.plugin(id).unwrap().state.clone()))
                 .collect();
-            Ok((BounceJob::start(plan)?, states))
+            let plugins = self.plugins.prepare_offline(&plan.project)?;
+            Ok((BounceJob::start(plan, plugins)?, states))
         });
         match prepared {
             Ok((job, plugin_states)) => {

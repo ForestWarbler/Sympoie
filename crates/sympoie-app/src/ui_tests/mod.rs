@@ -5069,6 +5069,58 @@ mod agent_mode {
     }
 
     #[test]
+    fn analysis_only_loads_external_plugins_on_the_main_thread() {
+        let mut harness = Harness::with_empty_project();
+        let folder = harness._files.0.join("vst.symp");
+        let path = harness._files.0.join("analysis-thread-check.vst3");
+        let mut project = Project::new();
+        let drums = project.add_midi_track("Drums");
+        let descriptor = sympoie::plugin::PluginDescriptor {
+            path: path.clone(),
+            class_id: "00000000000000000000000000000000".into(),
+            name: "External Drums".into(),
+            vendor: String::new(),
+            kind: sympoie::plugin::PluginKind::Instrument,
+        };
+        project
+            .set_plugin_instrument(
+                drums,
+                Some(sympoie::plugin::PluginInstance::new(
+                    descriptor,
+                    Vec::new(),
+                    Vec::new(),
+                )),
+            )
+            .unwrap();
+        save_project_folder(&project, &folder).unwrap();
+        harness.dispatch(Action::OpenPath(folder.clone()));
+        harness.dispatch(Action::ToggleAgentMode);
+        run_until(&mut harness, |_| {
+            folder.join(crate::mcp::DISCOVERY).is_file()
+        });
+
+        let call_folder = folder.clone();
+        let analysis = while_running(&mut harness, move || {
+            crate::mcp::server::call(
+                &call_folder,
+                "analyze_audio",
+                &serde_json::json!({"start_tick": 0, "end_tick": 3840}),
+            )
+        });
+        assert!(analysis.unwrap_err().contains("External Drums"));
+        let main = std::thread::current().id();
+        let loads: Vec<_> = crate::plugins::LOAD_THREADS
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(loaded, _)| *loaded == path)
+            .map(|&(_, thread)| thread)
+            .collect();
+        assert!(loads.len() >= 2, "the editor and the analysis both load it");
+        assert!(loads.iter().all(|&thread| thread == main), "{loads:?}");
+    }
+
+    #[test]
     fn agents_get_a_guide_and_tools_that_reach_the_open_editor() {
         let mut harness = Harness::with_empty_project();
         let folder = harness._files.0.join("tools.symp");

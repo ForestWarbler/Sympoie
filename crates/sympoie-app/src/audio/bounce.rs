@@ -28,7 +28,8 @@ pub struct BounceJob {
 }
 
 impl BounceJob {
-    pub fn start(plan: BouncePlan) -> Result<Self, String> {
+    /// `plugins` must come from `PluginRuntime::prepare_offline` on the main thread.
+    pub fn start(plan: BouncePlan, plugins: Arc<PluginRuntime>) -> Result<Self, String> {
         checked_frame_count(plan.start_frame, plan.end_frame)?;
         let total_frames = plan.end_frame;
         let progress = Arc::new(AtomicU64::new(0));
@@ -37,7 +38,7 @@ impl BounceJob {
             let (progress, cancel) = (Arc::clone(&progress), Arc::clone(&cancel));
             thread::Builder::new()
                 .name("sympoie-bounce".into())
-                .spawn(move || bounce(plan, &progress, &cancel))
+                .spawn(move || bounce(plan, plugins, &progress, &cancel))
                 .map_err(|error| format!("cannot start bounce: {error}"))?
         };
         Ok(Self {
@@ -102,6 +103,7 @@ fn cancelled(cancel: &AtomicBool) -> Result<(), String> {
 
 fn bounce(
     plan: BouncePlan,
+    plugins: Arc<PluginRuntime>,
     progress: &AtomicU64,
     cancel: &AtomicBool,
 ) -> Result<BounceResult, String> {
@@ -112,7 +114,6 @@ fn bounce(
             .prepare_audio_pitch(|| cancel.load(Ordering::Relaxed))
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "bounce cancelled".to_owned())?;
-        let plugins = PluginRuntime::new();
         let mut renderer = Renderer::with_plugin_host(&plan.project, &*plugins)
             .map_err(|error| error.to_string())?;
         render_audio(
@@ -122,7 +123,6 @@ fn bounce(
             progress,
             cancel,
             || {
-                plugins.service();
                 let errors = plugins.take_errors();
                 if errors.is_empty() {
                     Ok(())
@@ -223,6 +223,11 @@ mod tests {
         (project, samples)
     }
 
+    fn start(plan: BouncePlan) -> BounceJob {
+        let plugins = PluginRuntime::new().prepare_offline(&plan.project).unwrap();
+        BounceJob::start(plan, plugins).unwrap()
+    }
+
     fn finish(job: &mut BounceJob) -> BounceResult {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -238,7 +243,7 @@ mod tests {
     fn job_preserves_float_headroom_and_alignment_and_delivers_only_once() {
         let (project, source) = audio_project(127, 10_123);
         let plan = BouncePlan::new(&project, 1).unwrap();
-        let mut job = BounceJob::start(plan).unwrap();
+        let mut job = start(plan);
         let result = finish(&mut job);
         assert_eq!(result.plan.start_tick, 127);
         assert_eq!(result.audio.samples(), source);
@@ -250,7 +255,7 @@ mod tests {
     #[test]
     fn cancel_after_render_before_acceptance_discards_the_result() {
         let (project, _) = audio_project(0, 32);
-        let mut job = BounceJob::start(BouncePlan::new(&project, 1).unwrap()).unwrap();
+        let mut job = start(BouncePlan::new(&project, 1).unwrap());
         let deadline = Instant::now() + Duration::from_secs(10);
         while !job.thread.as_ref().unwrap().is_finished() {
             assert!(Instant::now() < deadline, "bounce worker did not finish");
@@ -281,7 +286,7 @@ mod tests {
         });
         project.add_midi_clip(track, clip).unwrap();
         let note_end = project.tempo().ticks_to_frames(91 + 960).unwrap();
-        let mut job = BounceJob::start(BouncePlan::new(&project, 1).unwrap()).unwrap();
+        let mut job = start(BouncePlan::new(&project, 1).unwrap());
         let result = finish(&mut job);
         let gate = (note_end - result.plan.start_frame) as usize;
         assert!(result.audio.len() > gate);
