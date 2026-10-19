@@ -20,17 +20,55 @@ fn midi_capture_preserves_channels_velocity_sustain_and_held_notes() {
                 duration_ticks: 160,
                 key: 60,
                 velocity: 99,
-                channel: 2
+                channel: 2,
+                slide_ticks: 0,
             },
             MidiNote {
                 start_tick: 160,
                 duration_ticks: 80,
                 key: 60,
                 velocity: 75,
-                channel: 2
+                channel: 2,
+                slide_ticks: 0,
             },
         ]
     );
+}
+
+#[test]
+fn pitch_wheel_moves_are_recorded_as_a_thinned_bend() {
+    let mut midi = MidiPerformance::default();
+    midi.event(0, 0, [0x90, 60, 100]);
+    // A steady push from centre to the top over 2000 frames, one message per 20 frames,
+    // then a hold and a snap back.
+    for step in 0..=100_u32 {
+        let value = 8192 + step * 8191 / 100;
+        midi.event(
+            0,
+            u64::from(step) * 20,
+            [0xe0, (value & 0x7f) as u8, (value >> 7) as u8],
+        );
+    }
+    midi.event(0, 4000, [0xe0, 0x7f, 0x7f]);
+    midi.event(0, 4020, [0xe0, 0, 64]);
+    midi.event(0, 5000, [0x80, 60, 0]);
+    let (notes, bend) = midi.finish_take(6000, Tempo::new(120.0).unwrap());
+    assert_eq!(notes.len(), 1);
+    assert!(bend.len() >= 3 && bend.len() <= 6, "{bend:?}");
+    assert_eq!(bend[0], BendPoint { tick: 0, value: 0 });
+    assert!(bend.iter().any(|point| point.value == 8191));
+    assert_eq!(bend.last().unwrap().value, 0);
+    assert!(bend.windows(2).all(|pair| pair[0].tick < pair[1].tick));
+}
+
+#[test]
+fn a_take_without_wheel_moves_has_no_bend() {
+    let mut midi = MidiPerformance::default();
+    midi.event(0, 0, [0x90, 60, 100]);
+    midi.event(0, 100, [0xe0, 0, 64]);
+    midi.event(0, 500, [0x80, 60, 0]);
+    let (_, bend) = midi.finish_take(1000, Tempo::new(120.0).unwrap());
+    assert!(bend.is_empty());
 }
 
 #[test]
@@ -63,6 +101,7 @@ fn one_take_records_each_kind_without_snapping_and_undoes_atomically() {
         key: 61,
         velocity: 77,
         channel: 4,
+        slide_ticks: 0,
     }];
     let clips = document
         .edit_structural("Record", |project| {
@@ -71,7 +110,7 @@ fn one_take_records_each_kind_without_snapping_and_undoes_atomically() {
                 37,
                 360,
                 BTreeMap::from([(1, samples.clone()), (3, vec![[0.5; 2]; 9000])]),
-                BTreeMap::from([(2, notes.clone())]),
+                BTreeMap::from([(2, (notes.clone(), Vec::new()))]),
             )
         })
         .unwrap();
@@ -79,7 +118,7 @@ fn one_take_records_each_kind_without_snapping_and_undoes_atomically() {
     let Track::Audio(first) = &document.project().tracks()[1] else {
         panic!()
     };
-    let first = first.clips()[0];
+    let first = first.clips()[0].clone();
     assert_eq!(first.start_tick, 37);
     assert_eq!(first.frame_count, 9000);
     assert_eq!(
@@ -214,6 +253,7 @@ fn captured_audio_and_midi_are_drained_before_stop_commits_the_take() {
             key: 60,
             velocity: 103,
             channel: 5,
+            slide_ticks: 0,
         }]
     );
     assert_eq!(app.document.undo_label(), Some("Record"));

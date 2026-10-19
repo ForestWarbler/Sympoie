@@ -10,6 +10,10 @@ pub struct Settings {
     pub audio: AudioSettings,
     pub general: GeneralSettings,
     pub agent: AgentSettings,
+    /// Export configurations live here rather than in each project: presets
+    /// are meant to be reused across projects, and "the last export" is the
+    /// starting point for the next one wherever it happens.
+    pub export: crate::export_config::ExportSettings,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +99,7 @@ impl Settings {
         if self.audio.sample_rate == Some(0) {
             self.audio.sample_rate = None;
         }
+        self.export = std::mem::take(&mut self.export).sanitized();
         self
     }
 }

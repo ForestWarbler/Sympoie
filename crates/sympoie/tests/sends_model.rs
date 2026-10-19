@@ -315,6 +315,7 @@ fn send_chains_extend_effect_tails_even_when_original_output_is_disconnected() {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -366,7 +367,7 @@ fn sends_round_trip_with_ordinary_outputs_and_mixer_effects() {
     project.set_track_send(audio, first, 0.5).unwrap();
     project.add_mixer_effect(first.into(), effect()).unwrap();
     let bytes = encoded(&project);
-    assert_eq!(&bytes[8..12], &13_u32.to_le_bytes());
+    assert_eq!(&bytes[8..12], &16_u32.to_le_bytes());
     let restored = read_project(bytes.as_slice()).unwrap();
     assert_eq!(encoded(&restored), bytes);
     for (before, after) in project.tracks().iter().zip(restored.tracks()) {

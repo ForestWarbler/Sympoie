@@ -780,6 +780,8 @@ impl ClipHarness {
                     start_tick: 480,
                     length_ticks: 3360,
                     notes: Vec::new(),
+                    name: None,
+                    pitch_bend: Vec::new(),
                 },
             )
             .unwrap();
@@ -1042,6 +1044,8 @@ fn clip_body_hit_testing_uses_unsnapped_bounds_and_the_topmost_clip() {
                 start_tick: 960,
                 length_ticks: 960,
                 notes: Vec::new(),
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -1157,7 +1161,7 @@ fn command_drag_copies_audio_and_midi_clips_across_tracks_once_on_release() {
 }
 
 #[test]
-fn clip_copy_drag_bypasses_time_selection_and_survives_modifier_release() {
+fn clip_copy_drag_bypasses_time_selection_and_follows_command_until_release() {
     let mut harness = ClipHarness::new();
     harness.selection.range = Some(TimeRange {
         start: 480,
@@ -1173,14 +1177,52 @@ fn clip_copy_drag_bypasses_time_selection_and_survives_modifier_release() {
     assert!(harness.interaction.range_move.is_none());
     assert!(harness.interaction.clip_drag.unwrap().copy);
     harness.modifiers = Modifiers::NONE;
+    harness.step(Vec::new());
+    assert!(!harness.interaction.clip_drag.unwrap().copy);
+    assert_eq!(harness.cursor, CursorIcon::Grabbing);
     assert!(matches!(
         harness.release_clip(destination).as_slice(),
-        [Action::CopyClipTo {
+        [Action::MoveClip {
             clip: ClipRef { track: 1, index: 0 },
             to_track: 1,
             start: 960,
         }]
     ));
+}
+
+#[test]
+fn pressing_command_mid_drag_copies_and_releasing_it_moves_again() {
+    for release_before_drop in [false, true] {
+        let mut harness = ClipHarness::new();
+        let origin = pos2(timeline().x(960.0), 58.0);
+        let destination = origin + vec2(48.0, 0.0);
+        harness.step(vec![egui::Event::PointerMoved(origin)]);
+        harness.button(origin, true);
+        harness.step(vec![egui::Event::PointerMoved(destination)]);
+        assert!(!harness.interaction.clip_drag.unwrap().copy);
+        assert_eq!(harness.cursor, CursorIcon::Grabbing);
+        harness.modifiers = Modifiers::COMMAND;
+        harness.step(Vec::new());
+        assert!(harness.interaction.clip_drag.unwrap().copy);
+        assert_eq!(harness.cursor, CursorIcon::Copy);
+        if release_before_drop {
+            harness.modifiers = Modifiers::NONE;
+            harness.step(Vec::new());
+        }
+        let actions = harness.release_clip(destination);
+        let clip = ClipRef { track: 1, index: 0 };
+        if release_before_drop {
+            assert!(matches!(
+                actions.as_slice(),
+                [Action::MoveClip { clip: moved, to_track: 1, start: 960 }] if *moved == clip
+            ));
+        } else {
+            assert!(matches!(
+                actions.as_slice(),
+                [Action::CopyClipTo { clip: copied, to_track: 1, start: 960 }] if *copied == clip
+            ));
+        }
+    }
 }
 
 #[test]
@@ -1348,6 +1390,8 @@ fn time_selection_can_start_in_one_clip_body_and_finish_in_another_track() {
                 start_tick: 480,
                 length_ticks: 3360,
                 notes: Vec::new(),
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -1413,6 +1457,7 @@ fn colored_clip(audio: bool, color: u32) -> ClipHarness {
                     pitch_semitones: 0.0,
                     pitch_algorithm: Default::default(),
                     preserve_formants: false,
+                    name: None,
                 },
             )
             .unwrap();
@@ -1432,7 +1477,10 @@ fn colored_clip(audio: bool, color: u32) -> ClipHarness {
                         key: 60,
                         velocity: 100,
                         channel: 0,
+                        slide_ticks: 0,
                     }],
+                    name: None,
+                    pitch_bend: Vec::new(),
                 },
             )
             .unwrap();

@@ -153,6 +153,7 @@ fn fixture() -> Project {
                         PitchAlgorithm::Signalsmith
                     },
                     preserve_formants: pitch != 0.0,
+                    name: None,
                 },
             )
             .unwrap();
@@ -183,6 +184,7 @@ fn fixture() -> Project {
                         key: 61,
                         velocity: 100,
                         channel: 3,
+                        slide_ticks: 0,
                     },
                     MidiNote {
                         start_tick: 0,
@@ -190,8 +192,11 @@ fn fixture() -> Project {
                         key: 127,
                         velocity: 1,
                         channel: 0,
+                        slide_ticks: 0,
                     },
                 ],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -488,6 +493,7 @@ fn in_place_bounce_keeps_the_track_id() {
                     key: 60,
                     velocity: 100,
                     channel: 0,
+                    slide_ticks: 0,
                 }],
                 ..MidiClip::new(0, 960)
             },

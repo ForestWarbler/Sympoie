@@ -46,7 +46,7 @@ fn recording_input_selections_round_trip_and_follow_tracks_after_reordering() {
     project.reorder_tracks(&[0, 3, 4, 2, 1]).unwrap();
 
     let bytes = encoded(&project);
-    assert_eq!(&bytes[8..12], &13_u32.to_le_bytes());
+    assert_eq!(&bytes[8..12], &16_u32.to_le_bytes());
     let restored = read_project(bytes.as_slice()).unwrap();
     assert_eq!(bytes, encoded(&restored));
     let [
@@ -257,6 +257,7 @@ fn recording_routing_edits_preserve_pitch_cache_and_running_transport() {
                 pitch_semitones: 3.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -305,6 +306,7 @@ fn audio_bounce_preserves_current_recording_input_selection() {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();

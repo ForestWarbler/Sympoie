@@ -120,6 +120,30 @@ impl AutomationTarget {
         targets
     }
 
+    /// Applies a control's offset from its anchor to an automated value, capped
+    /// to the parameter's range. Volume scales (a dB offset, so the fader at
+    /// −∞ silences the lane and moving it back restores the shape); every
+    /// other parameter shifts.
+    pub fn trim(self, shape: f64, base: f64, anchor: f64) -> f64 {
+        let value = match self {
+            Self::TrackGain if anchor == 0.0 => shape,
+            Self::TrackGain => shape * base / anchor,
+            _ => shape + base - anchor,
+        };
+        value.clamp(0.0, 1.0)
+    }
+
+    /// The control value that makes a trimmed lane play `output` where its
+    /// shape is `shape`; the inverse of [`Self::trim`] before capping.
+    pub fn base_for(self, output: f64, shape: f64, anchor: f64) -> f64 {
+        match self {
+            Self::TrackGain if shape == 0.0 || anchor == 0.0 => anchor,
+            Self::TrackGain => output * anchor / shape,
+            _ => output - shape + anchor,
+        }
+        .clamp(0.0, 1.0)
+    }
+
     pub fn value(self, track: &Track) -> Option<f64> {
         match self {
             Self::TrackGain => Some((f64::from(track.mixer().gain()) / 2.0).clamp(0.0, 1.0)),
@@ -202,6 +226,10 @@ pub struct AutomationLane {
     target: AutomationTarget,
     points: Vec<AutomationPoint>,
     enabled: bool,
+    /// The control's normalized value at which the lane plays back unchanged.
+    /// Moving the control away from it trims the whole lane (see
+    /// [`AutomationTarget::trim`]); the points themselves are never rewritten.
+    anchor: Option<f64>,
 }
 
 impl AutomationLane {
@@ -225,6 +253,7 @@ impl AutomationLane {
             target,
             points,
             enabled: true,
+            anchor: None,
         })
     }
 
@@ -239,6 +268,33 @@ impl AutomationLane {
     }
     pub fn with_enabled(self, enabled: bool) -> Self {
         Self { enabled, ..self }
+    }
+    pub fn anchor(&self) -> Option<f64> {
+        self.anchor
+    }
+    pub fn with_anchor(self, anchor: Option<f64>) -> Self {
+        Self {
+            anchor: anchor.filter(|a| a.is_finite()).map(|a| a.clamp(0.0, 1.0)),
+            ..self
+        }
+    }
+
+    /// The lane's value at `tick`, trimmed by how far the control (`base`,
+    /// normalized) has moved from the lane's anchor.
+    pub fn trimmed_value_at(&self, tick: f64, base: f64) -> Option<f64> {
+        let shape = self.value_at(tick)?;
+        Some(match self.anchor {
+            Some(anchor) => self.target.trim(shape, base, anchor),
+            None => shape,
+        })
+    }
+
+    /// Every point's value after the trim, for estimates that need the extremes.
+    pub fn trimmed_values(&self, base: f64) -> impl Iterator<Item = f64> + '_ {
+        self.points.iter().map(move |point| match self.anchor {
+            Some(anchor) => self.target.trim(point.value, base, anchor),
+            None => point.value,
+        })
     }
 
     pub fn value_at(&self, tick: f64) -> Option<f64> {

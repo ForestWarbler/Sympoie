@@ -11,6 +11,7 @@ fn note() -> MidiNote {
         key: 60,
         velocity: 100,
         channel: 0,
+        slide_ticks: 0,
     }
 }
 
@@ -20,6 +21,8 @@ fn midi_clip() -> MidiClip {
         start_tick: TICKS_PER_QUARTER * 4,
         length_ticks: TICKS_PER_QUARTER * 4,
         notes: vec![note()],
+        name: None,
+        pitch_bend: Vec::new(),
     }
 }
 
@@ -207,22 +210,23 @@ fn shared_assets_support_independent_clips_and_audio_duration_ignores_midi() {
         pitch_semitones: 0.0,
         pitch_algorithm: Default::default(),
         preserve_formants: false,
+        name: None,
     };
     let later_clip = AudioClip {
         source_start: 20,
         start_tick: 150,
         frame_count: 50,
         gain: -0.5,
-        ..clip
+        ..clip.clone()
     };
-    project.add_audio_clip(first, clip).unwrap();
-    project.add_audio_clip(second, later_clip).unwrap();
+    project.add_audio_clip(first, clip.clone()).unwrap();
+    project.add_audio_clip(second, later_clip.clone()).unwrap();
     project
         .add_audio_clip(
             first,
             AudioClip {
                 frame_count: 10,
-                ..clip
+                ..clip.clone()
             },
         )
         .unwrap();
@@ -243,6 +247,8 @@ fn shared_assets_support_independent_clips_and_audio_duration_ignores_midi() {
                 start_tick: u64::MAX - 1,
                 length_ticks: 1,
                 notes: Vec::new(),
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -301,6 +307,7 @@ fn invalid_track_ids_do_not_mutate_tracks() {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             }
         ),
         Err(ProjectError::UnknownAudioTrack { track: audio_id })
@@ -346,6 +353,8 @@ fn midi_accepts_boundary_values_empty_patterns_and_unsorted_overlapping_notes() 
                 ..note()
             },
         ],
+        name: None,
+        pitch_bend: Vec::new(),
     };
     project.add_midi_clip(track, clip.clone()).unwrap();
     project
@@ -356,6 +365,8 @@ fn midi_accepts_boundary_values_empty_patterns_and_unsorted_overlapping_notes() 
                 start_tick: u64::MAX - 1,
                 length_ticks: 1,
                 notes: Vec::new(),
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -370,6 +381,8 @@ fn midi_accepts_boundary_values_empty_patterns_and_unsorted_overlapping_notes() 
                     duration_ticks: u64::MAX,
                     ..note()
                 }],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -709,8 +722,9 @@ fn tempo_edits_preserve_ticks_and_audio_source_length_and_recompute_duration() {
         pitch_semitones: 0.0,
         pitch_algorithm: Default::default(),
         preserve_formants: false,
+        name: None,
     };
-    project.add_audio_clip(track, clip).unwrap();
+    project.add_audio_clip(track, clip.clone()).unwrap();
     assert_eq!(project.audio_duration_frames(), 24_050);
     project.set_bpm(60.0).unwrap();
     assert_eq!(project.audio_track(track).unwrap().clips(), &[clip]);
@@ -735,8 +749,9 @@ fn invalid_tempo_or_unrepresentable_audio_time_leaves_project_unchanged() {
         pitch_semitones: 0.0,
         pitch_algorithm: Default::default(),
         preserve_formants: false,
+        name: None,
     };
-    project.add_audio_clip(track, clip).unwrap();
+    project.add_audio_clip(track, clip.clone()).unwrap();
     project
         .set_audio_track_mixer(
             track,
@@ -754,14 +769,17 @@ fn invalid_tempo_or_unrepresentable_audio_time_leaves_project_unchanged() {
         Err(ProjectError::Time(TimeError::ConversionOverflow))
     );
     assert_eq!(project.bpm(), 120.0);
-    assert_eq!(project.audio_track(track).unwrap().clips(), &[clip]);
+    assert_eq!(
+        project.audio_track(track).unwrap().clips(),
+        std::slice::from_ref(&clip)
+    );
     assert_eq!(project.audio_duration_frames(), 24_001);
     assert_eq!(
         project.add_audio_clip(
             track,
             AudioClip {
                 start_tick: u64::MAX,
-                ..clip
+                ..clip.clone()
             }
         ),
         Err(ProjectError::Time(TimeError::ConversionOverflow))
@@ -785,6 +803,7 @@ fn insertion_snaps_both_clip_kinds_without_quantizing_lengths_or_notes() {
         pitch_semitones: 0.0,
         pitch_algorithm: Default::default(),
         preserve_formants: false,
+        name: None,
     };
     let pattern = MidiClip {
         offset_ticks: 0,
@@ -795,14 +814,16 @@ fn insertion_snaps_both_clip_kinds_without_quantizing_lengths_or_notes() {
             duration_ticks: 111,
             ..note()
         }],
+        name: None,
+        pitch_bend: Vec::new(),
     };
-    project.add_audio_clip(audio, clip).unwrap();
+    project.add_audio_clip(audio, clip.clone()).unwrap();
     project.add_midi_clip(midi, pattern.clone()).unwrap();
     assert_eq!(
         project.audio_track(audio).unwrap().clips(),
         &[AudioClip {
             start_tick: 240,
-            ..clip
+            ..clip.clone()
         }]
     );
     assert_eq!(
@@ -815,7 +836,7 @@ fn insertion_snaps_both_clip_kinds_without_quantizing_lengths_or_notes() {
     assert_eq!(project.audio_duration_frames(), 6051);
 
     project.set_snap_grid(SnapGrid::Off);
-    project.add_audio_clip(audio, clip).unwrap();
+    project.add_audio_clip(audio, clip.clone()).unwrap();
     project.add_midi_clip(midi, pattern.clone()).unwrap();
     assert_eq!(project.audio_track(audio).unwrap().clips()[1], clip);
     assert_eq!(project.midi_track(midi).unwrap().clips()[1], pattern);
@@ -840,9 +861,10 @@ fn moving_clips_preserves_content_and_updates_shortened_project_duration() {
         pitch_semitones: 0.0,
         pitch_algorithm: Default::default(),
         preserve_formants: false,
+        name: None,
     };
     let pattern = midi_clip();
-    project.add_audio_clip(audio, clip).unwrap();
+    project.add_audio_clip(audio, clip.clone()).unwrap();
     project.add_midi_clip(midi, pattern.clone()).unwrap();
     assert_eq!(project.audio_duration_frames(), 96_005);
     project.set_snap_grid(SnapGrid::Quarter);
@@ -907,22 +929,29 @@ fn audio_end_trim_uses_snapped_absolute_boundary_and_source_limits() {
         pitch_semitones: 0.0,
         pitch_algorithm: Default::default(),
         preserve_formants: false,
+        name: None,
     };
-    project.add_audio_clip(audio, clip).unwrap();
+    project.add_audio_clip(audio, clip.clone()).unwrap();
     project.set_snap_grid(SnapGrid::Quarter);
     project.trim_audio_clip_end(audio, 0, 2100).unwrap();
     let trimmed = AudioClip {
         frame_count: 24_000,
-        ..clip
+        ..clip.clone()
     };
-    assert_eq!(project.audio_track(audio).unwrap().clips(), &[trimmed]);
+    assert_eq!(
+        project.audio_track(audio).unwrap().clips(),
+        std::slice::from_ref(&trimmed)
+    );
     assert_eq!(project.audio_duration_frames(), 48_000);
     for end in [0, 960] {
         assert_eq!(
             project.trim_audio_clip_end(audio, 0, end),
             Err(ProjectError::EmptyClip)
         );
-        assert_eq!(project.audio_track(audio).unwrap().clips(), &[trimmed]);
+        assert_eq!(
+            project.audio_track(audio).unwrap().clips(),
+            std::slice::from_ref(&trimmed)
+        );
     }
     assert!(matches!(
         project.trim_audio_clip_end(audio, 0, 4800),
@@ -951,6 +980,7 @@ fn audio_end_trim_converts_endpoints_instead_of_rounding_a_duration() {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -1010,9 +1040,10 @@ fn invalid_edits_and_snap_overflow_leave_existing_clips_unchanged() {
         pitch_semitones: 0.0,
         pitch_algorithm: Default::default(),
         preserve_formants: false,
+        name: None,
     };
     let pattern = midi_clip();
-    project.add_audio_clip(audio, clip).unwrap();
+    project.add_audio_clip(audio, clip.clone()).unwrap();
     project.add_midi_clip(midi, pattern.clone()).unwrap();
     let missing_audio = Err(ProjectError::UnknownAudioClip {
         track: audio,
@@ -1044,7 +1075,7 @@ fn invalid_edits_and_snap_overflow_leave_existing_clips_unchanged() {
             audio,
             AudioClip {
                 start_tick: u64::MAX,
-                ..clip
+                ..clip.clone()
             }
         ),
         overflow

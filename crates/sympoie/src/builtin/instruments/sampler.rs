@@ -147,11 +147,8 @@ pub fn sampler_note_tail_frames_with_automation(
             };
             min + normalized * (max - min)
         };
-        let saved = instance
-            .parameters
-            .iter()
-            .find(|p| p.id == id)
-            .map_or(default, |p| physical(p.value));
+        let base = instance.parameters.iter().find(|p| p.id == id);
+        let saved = base.map_or(default, |p| physical(p.value));
         lanes
             .iter()
             .filter(|lane| {
@@ -162,8 +159,10 @@ pub fn sampler_note_tail_frames_with_automation(
                             parameter: id,
                         }
             })
-            .flat_map(|lane| lane.points())
-            .map(|point| physical(point.value))
+            .flat_map(|lane| {
+                lane.trimmed_values(base.map_or(lane.anchor().unwrap_or(0.0), |p| p.value))
+            })
+            .map(physical)
             .fold(saved, |a, b| if largest { a.max(b) } else { a.min(b) })
     };
     if get(SAMPLE_MODE, 0.0, 2.0, 1.0, 2.0, false).round() != 0.0 {
@@ -576,6 +575,7 @@ impl PluginProcessor for Sampler {
     }
     fn event(&mut self, event: NoteEvent) {
         match event {
+            NoteEvent::PitchBend { .. } => {}
             NoteEvent::On {
                 id, key, velocity, ..
             } => {

@@ -71,6 +71,7 @@ impl PluginProcessor for Processor {
         let mut device = self.device.lock().unwrap();
         device.events.push(event);
         match event {
+            NoteEvent::PitchBend { .. } => {}
             NoteEvent::On { id, .. } => {
                 device.scheduled.insert(id);
             }
@@ -149,6 +150,7 @@ fn note(start: u64, duration: u64) -> MidiNote {
         key: 60,
         velocity: 100,
         channel: 0,
+        slide_ticks: 0,
     }
 }
 
@@ -163,6 +165,8 @@ fn live_input_has_no_fixed_gate_and_note_off_preserves_arrangement_voices() {
                 start_tick: 0,
                 length_ticks: 60_000,
                 notes: vec![note(0, 60_000)],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -356,6 +360,8 @@ fn paused_monitor_excludes_arrangement_audio_and_notes_without_moving_the_cursor
                 start_tick: 0,
                 length_ticks: 1000,
                 notes: vec![note(0, 1000)],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -373,6 +379,7 @@ fn paused_monitor_excludes_arrangement_audio_and_notes_without_moving_the_cursor
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -417,6 +424,8 @@ fn monitoring_releases_scheduled_notes_once_and_resume_preserves_native_keys() {
                 start_tick: 0,
                 length_ticks: 150,
                 notes: vec![note(0, 100), note(10, 60)],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -495,6 +504,8 @@ fn pausing_at_audible_frame_preserves_native_keys_while_rewinding_the_schedule()
                 start_tick: 0,
                 length_ticks: 100,
                 notes: vec![note(0, 45), note(45, 20)],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -560,6 +571,8 @@ fn immediate_pause_and_resume_preserves_native_keys_without_an_idle_audio_block(
                 start_tick: 0,
                 length_ticks: 100,
                 notes: vec![note(0, 100)],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -619,6 +632,8 @@ fn midi_clip_edits_preserve_the_entire_builtin_preview_release() {
                 offset_ticks: 0,
                 length_ticks: 960,
                 notes: vec![note(0, 960)],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -666,6 +681,8 @@ fn midi_schedule_updates_chase_arrangement_without_resetting_preview_or_live_inp
                 offset_ticks: 0,
                 length_ticks: 10_000,
                 notes: vec![note(0, 10_000)],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -807,6 +824,8 @@ fn held_auditions_keep_independent_gates_from_live_input_and_arrangement() {
                 start_tick: 0,
                 length_ticks: 100_000,
                 notes: vec![note(0, 100_000)],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -1067,6 +1086,8 @@ fn replacing_and_dropping_auditions_releases_only_preview_voices() {
                 start_tick: 0,
                 length_ticks: gate as u64 * 4,
                 notes: vec![note(0, gate as u64 * 4)],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();

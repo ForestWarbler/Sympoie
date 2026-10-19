@@ -6,6 +6,7 @@ mod agent_docs;
 mod app;
 mod audio;
 mod document;
+mod export_config;
 mod mcp;
 mod plugins;
 mod settings;

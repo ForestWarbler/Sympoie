@@ -131,7 +131,10 @@ fn fixture() -> Project {
                     key: 64,
                     velocity: 100,
                     channel: 3,
+                    slide_ticks: 0,
                 }],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -148,6 +151,7 @@ fn fixture() -> Project {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -170,7 +174,7 @@ fn assert_preserved(original: &Project, restored: &Project) {
 fn standalone_and_directory_round_trip_solo_mute_nested_groups_and_builtin_bypass() {
     let original = fixture();
     let bytes = encoded(&original);
-    assert_eq!(&bytes[8..12], &13_u32.to_le_bytes());
+    assert_eq!(&bytes[8..12], &16_u32.to_le_bytes());
     let flags_end = bytes.len() - (4 + 3 * 2) - fixture().tracks().len() * 16;
     assert_eq!(
         &bytes[flags_end - 10..flags_end],
@@ -297,7 +301,7 @@ fn version_six_directory_loads_and_migrates_without_changing_existing_mute_or_sy
     assert_old_defaults(&upgraded, 6);
     assert_eq!(
         &fs::read(temp.0.join(PROJECT_MANIFEST)).unwrap()[8..12],
-        &13_u32.to_le_bytes()
+        &16_u32.to_le_bytes()
     );
 }
 

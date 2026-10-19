@@ -16,7 +16,9 @@ use sympoie::plugin::{
 };
 use sympoie::{Frame, SAMPLE_RATE};
 use vst3_host::audio::{AudioBusBuffer, AudioBusLayout, BusDirection, MediaType};
-use vst3_host::{BusAudioBuffers, MidiChannel, NoteId, Plugin, TransportPosition, Vst3Host};
+use vst3_host::{
+    BusAudioBuffers, MidiChannel, MidiEvent, NoteId, Plugin, TransportPosition, Vst3Host,
+};
 
 pub use editor::PluginEditor;
 pub use probe::run_probe;
@@ -353,7 +355,7 @@ impl PluginRuntime {
         if self.builtins.lock().is_ok_and(|entries| {
             entries
                 .get(&id)
-                .is_some_and(|(kind, _)| *kind == BuiltinKind::Comp)
+                .is_some_and(|(kind, _)| matches!(kind, BuiltinKind::Comp | BuiltinKind::VariMu))
         }) {
             return vec![PluginBusInfo {
                 index: 1,
@@ -683,6 +685,7 @@ fn processor(
         buses: Arc::clone(&entry.buses),
         latency: Arc::clone(&entry.latency),
         notes: Vec::with_capacity(4096),
+        bends: [BendRamp::default(); 16],
         errors,
         failed: false,
     }))
@@ -971,8 +974,41 @@ struct VstProcessor {
     buses: Arc<Mutex<BusState>>,
     latency: Arc<AtomicU32>,
     notes: Vec<(u64, NoteId)>,
+    /// Per-channel bend ramps. VST3 receives plain MIDI pitch bend, so ramps are
+    /// stepped once per processed chunk.
+    bends: [BendRamp; 16],
     errors: Arc<Mutex<Vec<String>>>,
     failed: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct BendRamp {
+    value: f32,
+    target: f32,
+    remaining: u32,
+    sent: Option<u16>,
+}
+
+impl BendRamp {
+    fn advance(&mut self, frames: u32) {
+        if self.remaining <= frames {
+            self.value = self.target;
+            self.remaining = 0;
+        } else {
+            self.value += (self.target - self.value) * frames as f32 / self.remaining as f32;
+            self.remaining -= frames;
+        }
+    }
+
+    /// The 14-bit value to send, or `None` when the plug-in already has it.
+    fn pending(&mut self) -> Option<u16> {
+        let scaled = if self.value < 0.0 { 8192.0 } else { 8191.0 };
+        let value = (8192.0 + self.value.clamp(-1.0, 1.0) * scaled).round() as u16;
+        (self.sent != Some(value)).then(|| {
+            self.sent = Some(value);
+            value
+        })
+    }
 }
 
 impl fmt::Debug for VstProcessor {
@@ -985,6 +1021,27 @@ impl fmt::Debug for VstProcessor {
 }
 
 impl VstProcessor {
+    fn send_bends(&mut self, frames: u32) {
+        for index in 0..self.bends.len() {
+            let Some(value) = self.bends[index].pending() else {
+                self.bends[index].advance(frames);
+                continue;
+            };
+            self.bends[index].advance(frames);
+            let Some(channel) = MidiChannel::from_index(index as u8) else {
+                continue;
+            };
+            let result = self.plugin.lock().map_err(poisoned).and_then(|mut plugin| {
+                plugin
+                    .send_midi_event(MidiEvent::PitchBend { channel, value })
+                    .map_err(|e| e.to_string())
+            });
+            if let Err(error) = result {
+                self.failed(error);
+            }
+        }
+    }
+
     fn failed(&mut self, error: impl fmt::Display) {
         if !self.failed {
             if let Ok(mut errors) = self.errors.lock() {
@@ -1057,6 +1114,12 @@ impl VstProcessor {
 impl PluginProcessor for VstProcessor {
     fn reset(&mut self) {
         self.notes.clear();
+        for bend in &mut self.bends {
+            *bend = BendRamp {
+                sent: bend.sent,
+                ..BendRamp::default()
+            };
+        }
         let result = self
             .plugin
             .lock()
@@ -1071,6 +1134,21 @@ impl PluginProcessor for VstProcessor {
         if self.failed {
             return;
         }
+        if let NoteEvent::PitchBend {
+            channel,
+            value,
+            ramp_frames,
+        } = event
+        {
+            if let Some(bend) = self.bends.get_mut(usize::from(channel)) {
+                bend.target = value;
+                bend.remaining = ramp_frames;
+                if ramp_frames == 0 {
+                    bend.value = value;
+                }
+            }
+            return;
+        }
         let result = self.plugin.lock().map_err(poisoned).and_then(|mut plugin| {
             match event {
                 NoteEvent::On {
@@ -1078,6 +1156,7 @@ impl PluginProcessor for VstProcessor {
                     key,
                     velocity,
                     channel,
+                    ..
                 } => {
                     if let Some(index) = self.notes.iter().position(|(old_id, _)| *old_id == id) {
                         let (_, note) = self.notes.swap_remove(index);
@@ -1099,6 +1178,7 @@ impl PluginProcessor for VstProcessor {
                         plugin.note_off(note).map_err(|e| e.to_string())?;
                     }
                 }
+                NoteEvent::PitchBend { .. } => {}
             }
             Ok(())
         });
@@ -1128,6 +1208,7 @@ impl PluginProcessor for VstProcessor {
         }
         for (index, chunk) in frames.chunks_mut(BLOCK_SIZE).enumerate() {
             if !self.failed {
+                self.send_bends(chunk.len() as u32);
                 let mut context = context;
                 let offset = index * BLOCK_SIZE;
                 if context.playing {
@@ -1524,6 +1605,7 @@ mod tests {
                 key: 60,
                 velocity: 100,
                 channel: 0,
+                slide_frames: 0,
             });
         }
         let mut peak = 0.0_f32;
@@ -1540,6 +1622,7 @@ mod tests {
                     frame: (block * 127) as u64,
                     bpm: 120.0,
                     playing: true,
+                    quality: sympoie::plugin::RenderQuality::Realtime,
                 },
             );
             assert!(frames.iter().flatten().all(|sample| sample.is_finite()));
@@ -1571,6 +1654,7 @@ mod tests {
                         frame: 12_700,
                         bpm: 120.0,
                         playing: true,
+                        quality: sympoie::plugin::RenderQuality::Realtime,
                     },
                 );
                 assert!(frames.iter().flatten().all(|sample| sample.is_finite()));

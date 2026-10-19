@@ -199,7 +199,7 @@ fn current_version_round_trip_preserves_missing_devices_state_parameters_order_a
         project.set_plugin_parameter(effect, 11, 0.9).unwrap();
     }
     let bytes = encoded(&project);
-    assert_eq!(&bytes[8..12], &13_u32.to_le_bytes());
+    assert_eq!(&bytes[8..12], &16_u32.to_le_bytes());
     let restored = read_project(bytes.as_slice()).unwrap();
     assert_eq!(encoded(&restored), bytes);
     assert_eq!(
@@ -269,7 +269,10 @@ fn external_instrument_and_routed_effect_chains_contribute_release_tails() {
                     key: 60,
                     velocity: 100,
                     channel: 0,
+                    slide_ticks: 0,
                 }],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -307,6 +310,7 @@ fn audio_effects_get_a_tail_but_empty_projects_remain_empty() {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();

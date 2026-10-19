@@ -424,7 +424,9 @@ pub fn midi_clip(project: &Project, clip: ClipRef) -> Option<&MidiClip> {
 pub fn copy_clip(project: &Project, clip: ClipRef) -> EditResult<ClipContent> {
     match track_id(project, clip.track)? {
         TrackId::Audio(_) => {
-            let clip = *audio_clip(project, clip).ok_or("clip no longer exists")?;
+            let clip = audio_clip(project, clip)
+                .ok_or("clip no longer exists")?
+                .clone();
             let asset = project.shared_audio_asset(clip.asset).map_err(text)?;
             Ok(ClipContent::Audio { clip, asset })
         }
@@ -446,7 +448,7 @@ pub fn paste_clip(
         let count = match content {
             ClipContent::Audio { clip, asset } => {
                 let id = audio_id(project, to_track)?;
-                let mut pasted = *clip;
+                let mut pasted = clip.clone();
                 pasted.start_tick = start;
                 pasted.asset = project.add_shared_asset(Arc::clone(asset));
                 project.add_audio_clip(id, pasted).map_err(text)?;
@@ -691,7 +693,9 @@ pub fn trim_end(project: &mut Project, clip: ClipRef, end: u64) -> EditResult<()
 pub fn trim_start(project: &mut Project, clip: ClipRef, start: u64) -> EditResult<ClipRef> {
     unsnapped(project, |project| match track_id(project, clip.track)? {
         TrackId::Audio(id) => {
-            let old = *audio_clip(project, clip).ok_or("clip no longer exists")?;
+            let old = audio_clip(project, clip)
+                .ok_or("clip no longer exists")?
+                .clone();
             let tempo = project.tempo();
             let old_start = tempo
                 .ticks_to_frames(old.start_tick)
@@ -742,6 +746,9 @@ pub fn trim_start(project: &mut Project, clip: ClipRef, start: u64) -> EditResul
                     for note in &mut trimmed.notes {
                         note.start_tick += room;
                     }
+                    for point in &mut trimmed.pitch_bend {
+                        point.tick += room;
+                    }
                     trimmed.offset_ticks = 0;
                 }
             }
@@ -762,7 +769,9 @@ pub fn trim_start(project: &mut Project, clip: ClipRef, start: u64) -> EditResul
 pub fn split_clip(project: &mut Project, clip: ClipRef, tick: u64) -> EditResult<ClipRef> {
     unsnapped(project, |project| match track_id(project, clip.track)? {
         TrackId::Audio(id) => {
-            let old = *audio_clip(project, clip).ok_or("clip no longer exists")?;
+            let old = audio_clip(project, clip)
+                .ok_or("clip no longer exists")?
+                .clone();
             let tempo = project.tempo();
             let start = tempo
                 .ticks_to_frames(old.start_tick)
@@ -809,6 +818,8 @@ pub fn split_clip(project: &mut Project, clip: ClipRef, tick: u64) -> EditResult
                 length_ticks: old.length_ticks - at,
                 offset_ticks: old.offset_ticks + at,
                 notes: old.notes,
+                name: old.name,
+                pitch_bend: old.pitch_bend,
             };
             project.remove_midi_clip(id, clip.index).map_err(text)?;
             for part in [left, right] {
@@ -836,6 +847,22 @@ pub fn delete_clip(project: &mut Project, clip: ClipRef) -> EditResult<()> {
         _ => return Err("only audio and MIDI tracks hold clips".to_owned()),
     }
     .map_err(text)
+}
+
+pub fn rename_clip(project: &mut Project, clip: ClipRef, name: &str) -> EditResult<()> {
+    match track_id(project, clip.track)? {
+        TrackId::Audio(id) => project.set_audio_clip_name(id, clip.index, Some(name)),
+        TrackId::Midi(id) => project.set_midi_clip_name(id, clip.index, Some(name)),
+        _ => return Err("only audio and MIDI tracks hold clips".to_owned()),
+    }
+    .map_err(text)
+}
+
+/// The name a clip shows, if the user gave it one.
+pub fn clip_name(project: &Project, clip: ClipRef) -> Option<&str> {
+    audio_clip(project, clip)
+        .and_then(|audio| audio.name.as_deref())
+        .or_else(|| midi_clip(project, clip).and_then(|midi| midi.name.as_deref()))
 }
 
 pub fn set_clip_gain(project: &mut Project, clip: ClipRef, gain: f32) -> EditResult<()> {
@@ -943,6 +970,7 @@ pub fn place_audio(
                     pitch_semitones: 0.0,
                     pitch_algorithm: PitchAlgorithm::Signalsmith,
                     preserve_formants: true,
+                    name: None,
                 },
             )
             .map_err(text)
@@ -970,6 +998,8 @@ pub fn insert_midi_clip(
                     start_tick: start,
                     length_ticks: length.max(1),
                     notes: Vec::new(),
+                    name: None,
+                    pitch_bend: Vec::new(),
                 },
             )
             .map_err(text)
@@ -1422,11 +1452,11 @@ mod tests {
     fn trimming_the_start_reveals_or_hides_source_audio() {
         let (mut project, clip) = ramp();
         let trimmed = trim_start(&mut project, clip, 3840 + 480).unwrap();
-        let audio = *audio_clip(&project, trimmed).unwrap();
+        let audio = (audio_clip(&project, trimmed).unwrap()).clone();
         assert_eq!((audio.source_start, audio.frame_count), (12_000, 36_000));
         assert_eq!(render_at(&project, 108_000), 12_000.0);
         let restored = trim_start(&mut project, trimmed, 3840).unwrap();
-        let audio = *audio_clip(&project, restored).unwrap();
+        let audio = (audio_clip(&project, restored).unwrap()).clone();
         assert_eq!((audio.source_start, audio.frame_count), (0, 48_000));
         assert!(trim_start(&mut project, restored, 3000).is_err());
         assert_eq!(
@@ -1505,6 +1535,7 @@ mod tests {
             key: 60,
             velocity: 100,
             channel: 0,
+            slide_ticks: 0,
         }
     }
 
@@ -1526,6 +1557,8 @@ mod tests {
                     length_ticks: 3840,
                     offset_ticks: 0,
                     notes: vec![note(0, 480), note(960, 1920)],
+                    name: None,
+                    pitch_bend: Vec::new(),
                 },
             )
             .unwrap();

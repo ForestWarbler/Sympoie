@@ -15,6 +15,9 @@ pub fn name(kind: BuiltinKind) -> &'static str {
         BuiltinKind::Sampler => "Sampler",
         BuiltinKind::Eq => "EQ",
         BuiltinKind::Comp => "Comp",
+        BuiltinKind::VariMu => "Vari-Mu",
+        BuiltinKind::Rain => "Rain",
+        BuiltinKind::Ferro => "Ferro",
     }
 }
 
@@ -24,6 +27,9 @@ pub fn editor_size(kind: BuiltinKind) -> [f32; 2] {
         BuiltinKind::Sampler => [700.0, 410.0],
         BuiltinKind::Eq => [890.0, 450.0],
         BuiltinKind::Comp => [530.0, 330.0],
+        BuiltinKind::VariMu => [720.0, 400.0],
+        BuiltinKind::Rain => [700.0, 520.0],
+        BuiltinKind::Ferro => [1180.0, 440.0],
     }
 }
 
@@ -33,6 +39,9 @@ pub fn minimum_editor_size(kind: BuiltinKind) -> [f32; 2] {
         BuiltinKind::Sampler => [690.0, 300.0],
         BuiltinKind::Eq => [880.0, 300.0],
         BuiltinKind::Comp => [520.0, 300.0],
+        BuiltinKind::VariMu => [600.0, 330.0],
+        BuiltinKind::Rain => [690.0, 300.0],
+        BuiltinKind::Ferro => [826.0, 308.0],
     }
 }
 
@@ -42,6 +51,9 @@ pub fn accent(kind: BuiltinKind) -> Color32 {
         BuiltinKind::Sampler => Color32::from_rgb(113, 210, 184),
         BuiltinKind::Eq => Color32::from_rgb(114, 187, 239),
         BuiltinKind::Comp => Color32::from_rgb(208, 157, 238),
+        BuiltinKind::VariMu => Color32::from_rgb(232, 168, 84),
+        BuiltinKind::Rain => Color32::from_rgb(104, 192, 234),
+        BuiltinKind::Ferro => Color32::from_rgb(255, 166, 56),
     }
 }
 
@@ -91,12 +103,75 @@ fn parse_value(spec: &ParameterSpec, text: &str) -> Option<f64> {
 #[path = "builtin_inline.rs"]
 mod inline;
 
+/// Seconds after the last spectrum refresh before the display starts to fade, and how long
+/// the fade takes.
+const SPECTRUM_HOLD: f64 = 0.25;
+const SPECTRUM_FADE: f64 = 0.5;
+
+/// A telemetry spectrum ready to draw. Devices keep their spectra through resets (the engine
+/// resets them at every loop wrap), so when refreshes stop because playback stopped the
+/// display fades to `floor` instead of freezing, like an analyzer hearing silence.
+fn display_spectrum(
+    ui: &Ui,
+    id: Id,
+    telemetry: &Telemetry,
+    bands: &[std::sync::atomic::AtomicU32; 128],
+    floor: f32,
+) -> [f32; 128] {
+    let now = ui.input(|input| input.time);
+    let updates = telemetry.spectrum_updates.load(Ordering::Relaxed);
+    let key = id.with("spectrum-age");
+    // A spectrum never seen refreshing is treated as long stale.
+    let (seen, since) = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<(u32, f64)>(key))
+        .unwrap_or((updates, f64::NEG_INFINITY));
+    let since = if updates == seen { since } else { now };
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(key, (updates, since)));
+    let fade = (((now - since) - SPECTRUM_HOLD) / SPECTRUM_FADE).clamp(0.0, 1.0) as f32;
+    std::array::from_fn(|band| {
+        let db = f32::from_bits(bands[band].load(Ordering::Relaxed)).max(floor);
+        db + (floor - db) * fade
+    })
+}
+
+/// Whether the device has a full faceplate that opens in its own window; the others show
+/// all their controls on the rack card.
+pub fn has_panel(kind: BuiltinKind) -> bool {
+    kind == BuiltinKind::Ferro
+}
+
+/// Whether the device has a before/after scope window.
+pub fn has_scope(kind: BuiltinKind) -> bool {
+    kind == BuiltinKind::VariMu
+}
+
+pub fn scope(
+    ui: &mut Ui,
+    plugin: &PluginInstance,
+    kind: BuiltinKind,
+    telemetry: Option<&Telemetry>,
+    actions: &mut Vec<Action>,
+) {
+    if !has_scope(kind) {
+        return;
+    }
+    ui.push_id(("builtin-scope", plugin.id), |ui| {
+        inline::scope(ui, plugin, telemetry, actions)
+    });
+    ui.ctx().request_repaint_after(Duration::from_millis(16));
+}
+
 pub fn card_width(kind: BuiltinKind) -> f32 {
     match kind {
         BuiltinKind::Oscil => 428.0,
         BuiltinKind::Sampler => 424.0,
         BuiltinKind::Eq => 460.0,
         BuiltinKind::Comp => 372.0,
+        BuiltinKind::VariMu => 448.0,
+        BuiltinKind::Rain => 428.0,
+        BuiltinKind::Ferro => 448.0,
     }
 }
 
@@ -119,13 +194,18 @@ pub fn show(
     telemetry: Option<&Telemetry>,
     actions: &mut Vec<Action>,
 ) {
-    let plate = ui.max_rect().expand(8.0).intersect(ui.clip_rect());
-    ui.painter()
-        .add(rack::faceplate(plate, Some(accent(kind)), false));
+    if !matches!(kind, BuiltinKind::VariMu | BuiltinKind::Ferro) {
+        let plate = ui.max_rect().expand(8.0).intersect(ui.clip_rect());
+        ui.painter()
+            .add(rack::faceplate(plate, Some(accent(kind)), false));
+    }
     ui.push_id(("builtin-editor", plugin.id), |ui| {
         inline::editor(ui, plugin, kind, telemetry, actions)
     });
-    if matches!(kind, BuiltinKind::Eq | BuiltinKind::Comp) {
+    if matches!(
+        kind,
+        BuiltinKind::Eq | BuiltinKind::Comp | BuiltinKind::VariMu | BuiltinKind::Rain
+    ) {
         ui.ctx().request_repaint_after(Duration::from_millis(33));
     }
 }
@@ -386,12 +466,17 @@ fn eq_plot(
         }
     }
     if let Some(telemetry) = telemetry {
-        let points: Vec<_> = telemetry
-            .spectrum
+        let spectrum = display_spectrum(
+            ui,
+            Id::new(("eq-spectrum", plugin.id, compact)),
+            telemetry,
+            &telemetry.spectrum,
+            -120.0,
+        );
+        let points: Vec<_> = spectrum
             .iter()
             .enumerate()
-            .map(|(i, value)| {
-                let db = f32::from_bits(value.load(Ordering::Relaxed));
+            .map(|(i, &db)| {
                 pos2(
                     graph.left() + i as f32 / 127.0 * graph.width(),
                     graph.bottom() - (db.clamp(-90.0, 0.0) + 90.0) / 90.0 * graph.height(),
@@ -541,6 +626,43 @@ fn compression_output(input: f64, threshold: f64, ratio: f64, knee: f64) -> f64 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_spectrum_fades_to_the_floor_and_returns_on_the_next_refresh() {
+        let ctx = egui::Context::default();
+        let telemetry = Telemetry::default();
+        telemetry.spectrum[10].store((-30.0_f32).to_bits(), Ordering::Relaxed);
+        let read = |time: f64| {
+            let mut band = 0.0;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    ..Default::default()
+                },
+                |ui| {
+                    band =
+                        display_spectrum(ui, Id::new("t"), &telemetry, &telemetry.spectrum, -120.0)
+                            [10];
+                },
+            );
+            output.textures_delta.clear();
+            band
+        };
+        // Never refreshed while watched: left over from an earlier run, so hidden.
+        assert_eq!(read(0.0), -120.0);
+        telemetry.spectrum_updates.store(1, Ordering::Relaxed);
+        assert_eq!(read(1.0), -30.0);
+        assert_eq!(
+            read(1.2),
+            -30.0,
+            "a gap shorter than the hold keeps the display"
+        );
+        let fading = read(1.5);
+        assert!(fading < -30.0 && fading > -120.0, "{fading}");
+        assert_eq!(read(2.0), -120.0);
+        telemetry.spectrum_updates.store(2, Ordering::Relaxed);
+        assert_eq!(read(2.1), -30.0);
+    }
 
     #[test]
     fn eq_frequency_axis_round_trips() {

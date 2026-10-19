@@ -16,6 +16,12 @@ native-pitch = ["dep:sympoie-signalsmith-pitch", "dep:sympoie-rubberband-pitch"]
 [dependencies]
 sympoie-signalsmith-pitch = { path = "../../vendor/signalsmith-pitch", optional = true }
 sympoie-rubberband-pitch = { path = "../../vendor/rubberband-pitch", optional = true }
+flacenc = { version = "0.5.1", default-features = false }
+mp3lame-encoder = "0.2.5"
+
+[dev-dependencies]
+# Already built for flacenc; the tests use it to check FLAC checksums.
+md-5 = "0.10.6"
 
 [lints]
 workspace = true

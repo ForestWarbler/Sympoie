@@ -11,6 +11,7 @@ fn note() -> MidiNote {
         key: 60,
         velocity: 100,
         channel: 7,
+        slide_ticks: 0,
     }
 }
 
@@ -26,6 +27,8 @@ fn fixture() -> (Project, MidiTrackId) {
                     start_tick,
                     length_ticks: 3840,
                     notes: vec![note()],
+                    name: None,
+                    pitch_bend: Vec::new(),
                 },
             )
             .unwrap();
@@ -54,6 +57,7 @@ fn batch_replacement_preserves_local_timing_polyphony_channels_and_clip_identity
             key: 0,
             velocity: 1,
             channel: 0,
+            slide_ticks: 0,
         },
         MidiNote {
             start_tick: 3839,
@@ -61,6 +65,7 @@ fn batch_replacement_preserves_local_timing_polyphony_channels_and_clip_identity
             key: 127,
             velocity: 127,
             channel: 15,
+            slide_ticks: 0,
         },
     ];
 
@@ -254,6 +259,8 @@ fn notes_outside_the_shown_region_are_kept_but_silent() {
                 ..note()
             },
         ],
+        name: None,
+        pitch_bend: Vec::new(),
     };
     project.add_midi_clip(track, clip.clone()).unwrap();
     assert_eq!(

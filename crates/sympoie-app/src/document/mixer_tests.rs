@@ -96,6 +96,7 @@ fn bus_project() -> Project {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -112,7 +113,10 @@ fn bus_project() -> Project {
                     key: 65,
                     velocity: 90,
                     channel: 2,
+                    slide_ticks: 0,
                 }],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();

@@ -51,24 +51,8 @@ impl SympoieApp {
                         start: None,
                     });
                 }
-                let can_export = self.export.is_none()
-                    && self.bounce.is_none()
-                    && self.status.render_error.is_none();
-                if item(
-                    ui,
-                    "Export Audio…",
-                    shortcut(ui, command_shift, Key::R),
-                    can_export,
-                ) {
-                    actions.push(Action::ExportAudio { loop_only: false });
-                }
-                if item(
-                    ui,
-                    "Export Loop Region…",
-                    String::new(),
-                    can_export && self.loop_region.enabled,
-                ) {
-                    actions.push(Action::ExportAudio { loop_only: true });
+                if item(ui, "Export…", shortcut(ui, command_shift, Key::R), true) {
+                    actions.push(Action::ShowExport);
                 }
                 ui.separator();
                 if item(ui, "Quit", shortcut(ui, command, Key::Q), true) {
@@ -240,11 +224,8 @@ impl SympoieApp {
                 }
                 ui.separator();
                 for kind in sympoie::builtin::BuiltinKind::ALL {
-                    let instrument = matches!(
-                        kind,
-                        sympoie::builtin::BuiltinKind::Oscil
-                            | sympoie::builtin::BuiltinKind::Sampler
-                    );
+                    let instrument =
+                        kind.descriptor().kind == sympoie::plugin::PluginKind::Instrument;
                     if item(
                         ui,
                         &format!("Add {}", kind.name()),
@@ -498,7 +479,7 @@ impl SympoieApp {
                             .show_percentage(),
                     );
                     ui.label(
-                        RichText::new(format!("Exporting {}", file_name(&job.path)))
+                        RichText::new(format!("Exporting {}", job.description()))
                             .color(theme::TEXT_DIM),
                     );
                     if ui.small_button("Cancel").clicked() {

@@ -14,6 +14,7 @@ fn note(start_tick: u64, duration_ticks: u64, key: u8) -> MidiNote {
         key,
         velocity: 100,
         channel: 7,
+        slide_ticks: 0,
     }
 }
 
@@ -47,6 +48,8 @@ fn fixture(notes: Vec<MidiNote>, release: f32) -> (Project, MidiTrackId) {
                 start_tick: 73,
                 length_ticks,
                 notes,
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -132,6 +135,7 @@ fn midi_mixes_with_audio_through_nested_groups_and_master() {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -252,6 +256,8 @@ fn invalid_frame_conversion_is_reported_and_convenience_output_is_cleared() {
                 start_tick: u64::MAX - 1000,
                 length_ticks: 100,
                 notes: vec![],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -395,6 +401,7 @@ fn instrument_updates_refuse_other_edits_and_extend_the_release_tail() {
                     pitch_semitones: 0.0,
                     pitch_algorithm: Default::default(),
                     preserve_formants: false,
+                    name: None,
                 },
             )
             .unwrap();

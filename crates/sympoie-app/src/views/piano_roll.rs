@@ -5,7 +5,7 @@ use eframe::egui::{
     Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2,
 };
 use sympoie::TICKS_PER_QUARTER;
-use sympoie::clip::MidiNote;
+use sympoie::clip::{BEND_MAX, BEND_MIN, BendPoint, MidiNote, bend_value_at, thin_bend};
 use sympoie::project::Project;
 use sympoie::time::{SnapGrid, TimeSignature};
 
@@ -25,6 +25,48 @@ const NOTE_GRID_MIN_HEIGHT: f32 = 48.0;
 const VELOCITY_DIVIDER_HEIGHT: f32 = 7.0;
 const SCROLLBAR_HEIGHT: f32 = 24.0;
 const EDGE_WIDTH: f32 = 5.0;
+/// Radius around a slide handle or bend point that picks it up.
+const HANDLE_RADIUS: f32 = 6.0;
+/// Freehand bend strokes are thinned to points that stay within this many 14-bit steps.
+const BEND_STROKE_TOLERANCE: f64 = 48.0;
+
+/// What the lane under the note grid edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Lane {
+    #[default]
+    Velocity,
+    Bend,
+}
+
+#[derive(Debug, Clone)]
+enum BendDrag {
+    /// Moving one breakpoint.
+    Point {
+        index: usize,
+        original: Vec<BendPoint>,
+        preview: Vec<BendPoint>,
+    },
+    /// Drawing freehand: `stroke` holds the raw points in drawing order.
+    Draw {
+        original: Vec<BendPoint>,
+        stroke: Vec<BendPoint>,
+        preview: Vec<BendPoint>,
+    },
+}
+
+impl BendDrag {
+    fn original(&self) -> &[BendPoint] {
+        match self {
+            Self::Point { original, .. } | Self::Draw { original, .. } => original,
+        }
+    }
+
+    fn preview(&self) -> &[BendPoint] {
+        match self {
+            Self::Point { preview, .. } | Self::Draw { preview, .. } => preview,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DragKind {
@@ -32,6 +74,8 @@ enum DragKind {
     Start,
     End,
     Velocity,
+    /// Dragging the end of a note's slide.
+    Slide,
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +133,8 @@ pub struct PianoRollState {
     drag: Option<NoteDrag>,
     marquee: Option<Marquee>,
     numeric: Option<NumericEdit>,
+    lane: Lane,
+    bend_drag: Option<BendDrag>,
     clipboard: Vec<MidiNote>,
     notice: Option<String>,
     pending_selection: Option<BTreeSet<usize>>,
@@ -119,6 +165,8 @@ impl Default for PianoRollState {
             drag: None,
             marquee: None,
             numeric: None,
+            lane: Lane::Velocity,
+            bend_drag: None,
             clipboard: Vec::new(),
             notice: None,
             pending_selection: None,
@@ -161,6 +209,7 @@ impl PianoRollState {
         self.cancel_audition();
         self.selected.clear();
         self.drag = None;
+        self.bend_drag = None;
         self.marquee = None;
         self.numeric = None;
         self.notice = None;
@@ -526,7 +575,15 @@ pub fn show(
             .id_salt("piano-properties")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                toolbar(ui, state, &clip.notes, extent, color, actions);
+                toolbar(
+                    ui,
+                    state,
+                    &clip.notes,
+                    &clip.pitch_bend,
+                    extent,
+                    color,
+                    actions,
+                );
             });
     });
     let editor = Rect::from_min_max(pos2(side.right() + 1.0, full.top()), full.max);
@@ -678,6 +735,7 @@ pub fn show(
                 key,
                 velocity: state.default_velocity,
                 channel: state.default_channel,
+                slide_ticks: 0,
             }],
             actions,
         );
@@ -704,26 +762,56 @@ pub fn show(
         Sense::click_and_drag(),
     );
     let pointer = ui.input(|input| input.pointer.interact_pos());
+    // Command can be pressed or released mid-drag; whatever is held at the drop decides.
+    if let Some(drag) = &mut state.drag {
+        drag.copy = drag.kind == DragKind::Move && ui.input(|input| input.modifiers.command);
+    }
+    if let Some(pointer) = pointer
+        && state.lane == Lane::Bend
+    {
+        bend_interaction(
+            ui,
+            state,
+            clip,
+            geo,
+            velocity,
+            &velocity_response,
+            pointer,
+            extent,
+            actions,
+        );
+    }
     if let Some(pointer) = pointer {
+        let bend_lane = state.lane == Lane::Bend && velocity.contains(pointer);
         if ui.input(|input| input.pointer.primary_pressed())
+            && !bend_lane
+            && state.bend_drag.is_none()
             && (response.contains_pointer() || velocity_response.contains_pointer())
         {
             state.focused = true;
             state.notice = None;
             let in_velocity = velocity.contains(pointer);
-            let hit = clip
-                .notes
-                .iter()
-                .enumerate()
-                .rev()
-                .find(|(_, note)| {
-                    if in_velocity {
-                        (geo.x(note.start_tick) - pointer.x).abs() <= 6.0
-                    } else {
-                        geo.note_rect(note).contains(pointer)
-                    }
+            let slide_hit = (!in_velocity)
+                .then(|| {
+                    state.selected.iter().copied().find(|index| {
+                        slide_handle(geo, &clip.notes[*index]).distance(pointer) <= HANDLE_RADIUS
+                    })
                 })
-                .map(|(index, _)| index);
+                .flatten();
+            let hit = slide_hit.or_else(|| {
+                clip.notes
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, note)| {
+                        if in_velocity {
+                            (geo.x(note.start_tick) - pointer.x).abs() <= 6.0
+                        } else {
+                            geo.note_rect(note).contains(pointer)
+                        }
+                    })
+                    .map(|(index, _)| index)
+            });
             if let Some(index) = hit {
                 let shift = ui.input(|input| input.modifiers.shift);
                 if shift && state.selected.contains(&index) {
@@ -735,7 +823,9 @@ pub fn show(
                     state.selected.insert(index);
                     state.begin_audition(clip_ref.track, [clip.notes[index]], actions);
                     let rect = geo.note_rect(&clip.notes[index]);
-                    let kind = if in_velocity {
+                    let kind = if slide_hit.is_some() {
+                        DragKind::Slide
+                    } else if in_velocity {
                         DragKind::Velocity
                     } else if pointer.x >= rect.right() - EDGE_WIDTH.min(rect.width() / 3.0) {
                         DragKind::End
@@ -785,6 +875,7 @@ pub fn show(
                             key: geo.key(pointer.y),
                             velocity: state.default_velocity,
                             channel: state.default_channel,
+                            slide_ticks: 0,
                         }],
                         actions,
                     );
@@ -797,10 +888,10 @@ pub fn show(
             let movement = pointer - drag.origin;
             let original = drag.original[drag.anchor];
             let delta = (f64::from(movement.x) / geo.pixels_per_tick).round() as i128;
-            let anchor_tick = if drag.kind == DragKind::End {
-                note_end(&original)
-            } else {
-                original.start_tick
+            let anchor_tick = match drag.kind {
+                DragKind::End => note_end(&original),
+                DragKind::Slide => original.start_tick + u64::from(original.slide_ticks),
+                _ => original.start_tick,
             };
             let target = (i128::from(anchor_tick) + delta).clamp(0, i128::from(u64::MAX)) as u64;
             let dt = if movement.x.abs() < 2.0 {
@@ -829,6 +920,7 @@ pub fn show(
                     &state.selected,
                     (-movement.y * 127.0 / velocity_range_height(velocity)).round() as i16,
                 ),
+                DragKind::Slide => slid(&drag.original, &state.selected, dt),
             };
             if drag.kind == DragKind::Move
                 && drag.preview[drag.anchor].key != previous_key
@@ -846,7 +938,7 @@ pub fn show(
             ui.ctx().set_cursor_icon(match drag.kind {
                 DragKind::Move if drag.copy => CursorIcon::Copy,
                 DragKind::Move => CursorIcon::Grabbing,
-                DragKind::Start | DragKind::End => CursorIcon::ResizeHorizontal,
+                DragKind::Start | DragKind::End | DragKind::Slide => CursorIcon::ResizeHorizontal,
                 DragKind::Velocity => CursorIcon::ResizeVertical,
             });
         }
@@ -890,6 +982,7 @@ pub fn show(
                     DragKind::Move => "Move MIDI notes",
                     DragKind::Start | DragKind::End => "Resize MIDI notes",
                     DragKind::Velocity => "Set MIDI velocity",
+                    DragKind::Slide => "Set MIDI note slide",
                 },
                 actions,
             );
@@ -915,6 +1008,7 @@ pub fn show(
                 key: geo.key(pointer.y),
                 velocity: state.default_velocity,
                 channel: state.default_channel,
+                slide_ticks: 0,
             };
             let mut notes = clip.notes.clone();
             state.pending_selection = Some([notes.len()].into());
@@ -949,7 +1043,17 @@ pub fn show(
         })
         .unwrap_or(&clip.notes);
     paint_notes(ui, geo, notes, selected, color);
-    paint_velocity(ui, geo, velocity, area.left(), notes, selected, color);
+    match state.lane {
+        Lane::Velocity => paint_velocity(ui, geo, velocity, area.left(), notes, selected, color),
+        Lane::Bend => {
+            let points = state
+                .bend_drag
+                .as_ref()
+                .map_or(clip.pitch_bend.as_slice(), BendDrag::preview);
+            let hovered = pointer.filter(|pointer| velocity.contains(*pointer));
+            paint_bend(ui, geo, velocity, area.left(), points, hovered, color);
+        }
+    }
     paint_region(ui, geo, ruler, velocity, region, extent);
     if let Some(marquee) = &state.marquee
         && marquee.current.distance(marquee.origin) > 3.0
@@ -992,19 +1096,63 @@ pub fn show(
             egui::Slider::new(&mut state.scroll_tick, 0.0..=max_scroll).show_value(false),
         );
     });
-    ui.painter().text(
-        pos2(area.left() + 5.0, area.bottom() - SCROLLBAR_HEIGHT / 2.0),
-        Align2::LEFT_CENTER,
-        "Velocity",
-        theme::prop(10.0),
-        theme::TEXT_DIM,
+    lane_switch(
+        ui,
+        state,
+        Rect::from_min_max(
+            pos2(area.left() + 3.0, area.bottom() - SCROLLBAR_HEIGHT + 3.0),
+            pos2(grid.left() - 3.0, area.bottom() - 3.0),
+        ),
     );
+}
+
+/// Velocity / Bend tabs under the keyboard.
+fn lane_switch(ui: &mut Ui, state: &mut PianoRollState, rect: Rect) {
+    let half = rect.width() / 2.0;
+    for (index, (lane, label, hint)) in [
+        (Lane::Velocity, "Vel", "Edit note velocities in the lane"),
+        (Lane::Bend, "Bend", "Draw the clip's pitch bend in the lane"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let tab = Rect::from_min_size(
+            rect.min + vec2(index as f32 * half, 0.0),
+            vec2(half - 1.0, rect.height()),
+        );
+        let response = ui.interact(tab, Id::new(("piano-lane", index)), Sense::click());
+        let on = state.lane == lane;
+        ui.painter().rect_filled(
+            tab,
+            2.0,
+            if on {
+                theme::ACCENT.gamma_multiply(0.35)
+            } else if response.hovered() {
+                theme::BG_RAISED
+            } else {
+                theme::BG_PANEL
+            },
+        );
+        ui.painter().text(
+            tab.center(),
+            Align2::CENTER_CENTER,
+            label,
+            theme::prop(10.0),
+            if on { theme::TEXT } else { theme::TEXT_DIM },
+        );
+        if response.on_hover_text(hint).clicked() {
+            state.lane = lane;
+            state.bend_drag = None;
+            state.focused = true;
+        }
+    }
 }
 
 fn toolbar(
     ui: &mut Ui,
     state: &mut PianoRollState,
     notes: &[MidiNote],
+    bend: &[BendPoint],
     length: u64,
     color: Color32,
     actions: &mut Vec<Action>,
@@ -1110,7 +1258,29 @@ fn toolbar(
                     .inner
                 })
                 .inner;
-            let changed = velocity_response.changed() || channel_response.changed();
+            let mut slide = first.map_or(0, |index| source[index].slide_ticks);
+            let slide_response = ui
+                .horizontal(|ui| {
+                    ui.label(RichText::new("Slide").color(theme::TEXT_DIM));
+                    ui.add_enabled_ui(first.is_some(), |ui| {
+                        ui.push_id("piano-slide", |ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut slide)
+                                    .range(0..=u32::try_from(length).unwrap_or(u32::MAX))
+                                    .speed(2),
+                            )
+                        })
+                        .inner
+                    })
+                    .inner
+                })
+                .inner
+                .on_hover_text(
+                    "Glide into the note from the previous pitch over this many ticks, without restarting its envelope (instruments that support slides, like Ferro)",
+                );
+            let changed = velocity_response.changed()
+                || channel_response.changed()
+                || slide_response.changed();
             if first.is_none() {
                 state.default_velocity = velocity;
                 state.default_channel = channel - 1;
@@ -1126,9 +1296,14 @@ fn toolbar(
                     if channel_response.changed() {
                         edit.preview[*index].channel = channel - 1;
                     }
+                    if slide_response.changed() {
+                        let note = &mut edit.preview[*index];
+                        note.slide_ticks =
+                            slide.min(u32::try_from(note.duration_ticks).unwrap_or(u32::MAX));
+                    }
                 }
             }
-            let mut responses = vec![velocity_response, channel_response];
+            let mut responses = vec![velocity_response, channel_response, slide_response];
             if state.selected.len() == 1 {
                 let index = *state.selected.first().unwrap();
                 let note = state
@@ -1190,8 +1365,40 @@ fn toolbar(
                 );
             }
             ui.horizontal_wrapped(|ui| {
+                if first.is_some() {
+                    let sliding = state
+                        .selected
+                        .iter()
+                        .all(|index| notes[*index].slide_ticks > 0);
+                    let label = if sliding { "No slide" } else { "Slide" };
+                    if ui
+                        .button(label)
+                        .on_hover_text("Toggle a sixteenth-note slide into the selected notes")
+                        .clicked()
+                    {
+                        let mut edited = notes.to_vec();
+                        for index in &state.selected {
+                            let note = &mut edited[*index];
+                            note.slide_ticks = if sliding {
+                                0
+                            } else {
+                                (TICKS_PER_QUARTER / 4).min(note.duration_ticks) as u32
+                            };
+                        }
+                        state.emit(notes, edited, "Set MIDI note slide", actions);
+                    }
+                }
                 if first.is_some() && ui.button("Delete notes").clicked() {
                     state.delete(notes, actions);
+                }
+                if state.lane == Lane::Bend
+                    && !bend.is_empty()
+                    && ui
+                        .button("Clear bend")
+                        .on_hover_text("Remove this clip's pitch bend")
+                        .clicked()
+                {
+                    emit_bend(state, bend, Vec::new(), "Clear pitch bend", actions);
                 }
                 if ui
                     .button("Close")
@@ -1302,6 +1509,322 @@ fn resized(
         }
     }
     result
+}
+
+/// Where a note's slide handle sits: at the top edge, where the slide reaches the note's
+/// pitch (its start when it does not slide).
+fn slide_handle(geo: Geometry, note: &MidiNote) -> Pos2 {
+    let rect = geo.note_rect(note);
+    let x = geo.x(note.start_tick + u64::from(note.slide_ticks));
+    pos2(x.min(rect.right() - 2.0).max(rect.left() + 2.0), rect.top())
+}
+
+fn slid(notes: &[MidiNote], selected: &BTreeSet<usize>, delta: i128) -> Vec<MidiNote> {
+    let mut result = notes.to_vec();
+    for index in selected {
+        let note = &mut result[*index];
+        let slide = (i128::from(note.slide_ticks) + delta)
+            .clamp(0, i128::from(note.duration_ticks.min(u64::from(u32::MAX))));
+        note.slide_ticks = slide as u32;
+    }
+    result
+}
+
+/// For each note, the key it slides from: the note that started most recently before it.
+fn slide_sources(notes: &[MidiNote]) -> Vec<Option<u8>> {
+    let mut order: Vec<usize> = (0..notes.len()).collect();
+    order.sort_by_key(|index| (notes[*index].start_tick, *index));
+    let mut sources = vec![None; notes.len()];
+    for pair in order.windows(2) {
+        let (before, after) = (notes[pair[0]], notes[pair[1]]);
+        if before.start_tick < after.start_tick {
+            sources[pair[1]] = Some(before.key);
+        }
+    }
+    sources
+}
+
+const BEND_PADDING: f32 = 6.0;
+
+fn bend_y(lane: Rect, value: i16) -> f32 {
+    let half = (lane.height() / 2.0 - BEND_PADDING).max(1.0);
+    lane.center().y - sympoie::clip::bend_normalized(value) * half
+}
+
+fn bend_value(lane: Rect, y: f32) -> i16 {
+    let half = (lane.height() / 2.0 - BEND_PADDING).max(1.0);
+    let offset = lane.center().y - y;
+    // A small detent around the centre makes returning to no bend easy.
+    if offset.abs() <= 3.0 {
+        return 0;
+    }
+    let normalized = (offset / half).clamp(-1.0, 1.0);
+    if normalized < 0.0 {
+        (normalized * -f32::from(BEND_MIN)).round() as i16
+    } else {
+        (normalized * f32::from(BEND_MAX)).round() as i16
+    }
+}
+
+/// Replaces the original points under a freehand stroke with the stroke, thinned.
+fn merge_stroke(original: &[BendPoint], stroke: &[BendPoint]) -> Vec<BendPoint> {
+    let Some(from) = stroke.iter().map(|point| point.tick).min() else {
+        return original.to_vec();
+    };
+    let to = stroke.iter().map(|point| point.tick).max().unwrap_or(from);
+    let mut drawn: Vec<BendPoint> = Vec::with_capacity(stroke.len());
+    let mut sorted = stroke.to_vec();
+    sorted.sort_by_key(|point| point.tick);
+    for point in sorted {
+        match drawn.last_mut() {
+            Some(last) if last.tick == point.tick => last.value = point.value,
+            _ => drawn.push(point),
+        }
+    }
+    let drawn = thin_bend(&drawn, BEND_STROKE_TOLERANCE);
+    let mut merged: Vec<BendPoint> = original
+        .iter()
+        .filter(|point| point.tick < from || point.tick > to)
+        .copied()
+        .chain(drawn)
+        .collect();
+    merged.sort_by_key(|point| point.tick);
+    merged.dedup_by_key(|point| point.tick);
+    merged
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bend_interaction(
+    ui: &Ui,
+    state: &mut PianoRollState,
+    clip: &sympoie::clip::MidiClip,
+    geo: Geometry,
+    lane: Rect,
+    response: &egui::Response,
+    pointer: Pos2,
+    extent: u64,
+    actions: &mut Vec<Action>,
+) {
+    let points = &clip.pitch_bend;
+    let hit = |points: &[BendPoint]| {
+        points
+            .iter()
+            .enumerate()
+            .filter(|(_, point)| {
+                pos2(geo.x(point.tick), bend_y(lane, point.value)).distance(pointer)
+                    <= HANDLE_RADIUS
+            })
+            .min_by(|a, b| {
+                let distance = |point: &BendPoint| (geo.x(point.tick) - pointer.x).abs();
+                distance(a.1).total_cmp(&distance(b.1))
+            })
+            .map(|(index, _)| index)
+    };
+    if response.double_clicked()
+        && let Some(index) = hit(points)
+    {
+        let mut edited = points.clone();
+        edited.remove(index);
+        state.bend_drag = None;
+        emit_bend(state, points, edited, "Delete pitch bend point", actions);
+        return;
+    }
+    let tick = geo.tick(pointer.x).min(extent);
+    let value = bend_value(lane, pointer.y);
+    if ui.input(|input| input.pointer.primary_pressed()) && lane.contains(pointer) {
+        state.focused = true;
+        state.bend_drag = Some(match hit(points) {
+            Some(index) => BendDrag::Point {
+                index,
+                original: points.clone(),
+                preview: points.clone(),
+            },
+            None => {
+                let stroke = vec![BendPoint { tick, value }];
+                BendDrag::Draw {
+                    original: points.clone(),
+                    preview: merge_stroke(points, &stroke),
+                    stroke,
+                }
+            }
+        });
+    } else if ui.input(|input| input.pointer.primary_down()) {
+        match &mut state.bend_drag {
+            Some(BendDrag::Point {
+                index,
+                original,
+                preview,
+            }) => {
+                let lower = index
+                    .checked_sub(1)
+                    .map_or(0, |previous| original[previous].tick + 1);
+                let upper = original
+                    .get(*index + 1)
+                    .map_or(extent, |next| next.tick.saturating_sub(1));
+                preview[*index] = BendPoint {
+                    tick: tick.clamp(lower, upper.max(lower)),
+                    value,
+                };
+                ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+            }
+            Some(BendDrag::Draw {
+                original,
+                stroke,
+                preview,
+            }) => {
+                if stroke.last().is_none_or(|last| {
+                    (geo.x(last.tick) - pointer.x).abs() >= 2.0 || last.value != value
+                }) {
+                    stroke.push(BendPoint { tick, value });
+                    *preview = merge_stroke(original, stroke);
+                }
+                ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+            }
+            None => {}
+        }
+    }
+    if ui.input(|input| input.pointer.primary_released())
+        && let Some(drag) = state.bend_drag.take()
+    {
+        let label = match drag {
+            BendDrag::Point { .. } => "Move pitch bend point",
+            BendDrag::Draw { .. } => "Draw pitch bend",
+        };
+        emit_bend(
+            state,
+            drag.original(),
+            drag.preview().to_vec(),
+            label,
+            actions,
+        );
+    }
+}
+
+fn emit_bend(
+    state: &PianoRollState,
+    original: &[BendPoint],
+    points: Vec<BendPoint>,
+    label: &'static str,
+    actions: &mut Vec<Action>,
+) {
+    if points != original
+        && let Some(clip) = state.clip
+    {
+        actions.push(Action::EditMidiPitchBend {
+            clip,
+            before: original.to_vec(),
+            points,
+            label,
+        });
+    }
+}
+
+fn paint_bend(
+    ui: &Ui,
+    geo: Geometry,
+    lane: Rect,
+    left: f32,
+    points: &[BendPoint],
+    hovered: Option<Pos2>,
+    track_color: Color32,
+) {
+    let painter = ui.painter().with_clip_rect(lane);
+    painter.rect_filled(lane, 0.0, theme::BG_DEEP);
+    let axis = Rect::from_min_max(pos2(left, lane.top()), lane.left_bottom());
+    let axis_painter = ui.painter().with_clip_rect(axis);
+    axis_painter.rect_filled(axis, 0.0, theme::BG_PANEL);
+    for (value, label) in [
+        (BEND_MAX, "+"),
+        (BEND_MAX / 2, ""),
+        (0, "0"),
+        (BEND_MIN / 2, ""),
+        (BEND_MIN, "−"),
+    ] {
+        let y = bend_y(lane, value);
+        painter.hline(
+            lane.x_range(),
+            y,
+            Stroke::new(
+                1.0,
+                if value == 0 {
+                    theme::BORDER
+                } else {
+                    theme::grid_beat()
+                },
+            ),
+        );
+        if !label.is_empty() {
+            axis_painter.text(
+                pos2(axis.right() - 8.0, y),
+                Align2::RIGHT_CENTER,
+                label,
+                theme::mono(9.0),
+                theme::TEXT_DIM,
+            );
+        }
+    }
+    if points.is_empty() {
+        painter.text(
+            lane.center(),
+            Align2::CENTER_CENTER,
+            "Drag to draw pitch bend",
+            theme::prop(10.0),
+            theme::TEXT_DIM,
+        );
+        return;
+    }
+    // The curve holds its first and last values beyond the points.
+    let mut line = vec![pos2(lane.left(), bend_y(lane, points[0].value))];
+    line.extend(
+        points
+            .iter()
+            .map(|point| pos2(geo.x(point.tick), bend_y(lane, point.value))),
+    );
+    line.push(pos2(
+        lane.right(),
+        bend_y(lane, points[points.len() - 1].value),
+    ));
+    let zero = bend_y(lane, 0);
+    let fill: Vec<Pos2> = line.clone();
+    for pair in fill.windows(2) {
+        let mesh_color = track_color.gamma_multiply(0.18);
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                pair[0],
+                pair[1],
+                pos2(pair[1].x, zero),
+                pos2(pair[0].x, zero),
+            ],
+            mesh_color,
+            Stroke::NONE,
+        ));
+    }
+    painter.add(egui::Shape::line(line, Stroke::new(1.5, track_color)));
+    for point in points {
+        let center = pos2(geo.x(point.tick), bend_y(lane, point.value));
+        let hot = hovered.is_some_and(|pointer| pointer.distance(center) <= HANDLE_RADIUS);
+        painter.circle_filled(
+            center,
+            if hot { 4.5 } else { 3.0 },
+            if hot { theme::ACCENT } else { track_color },
+        );
+        painter.circle_stroke(
+            center,
+            if hot { 4.5 } else { 3.0 },
+            Stroke::new(1.0, Color32::from_black_alpha(160)),
+        );
+    }
+    if let Some(pointer) = hovered {
+        let tick = geo.tick(pointer.x);
+        let value = bend_value_at(points, tick);
+        painter.text(
+            pos2(lane.right() - 6.0, lane.top() + 4.0),
+            Align2::RIGHT_TOP,
+            format!("{:+.0}%", sympoie::clip::bend_normalized(value) * 100.0),
+            theme::mono(9.0),
+            theme::TEXT_DIM,
+        );
+    }
 }
 
 fn velocity_shifted(notes: &[MidiNote], selected: &BTreeSet<usize>, delta: i16) -> Vec<MidiNote> {
@@ -1454,6 +1977,38 @@ fn paint_notes(
     color: Color32,
 ) {
     let painter = ui.painter().with_clip_rect(geo.grid);
+    // Slides first, so notes draw over the start of their ramps.
+    let sources = slide_sources(notes);
+    for (index, note) in notes.iter().enumerate() {
+        if note.slide_ticks == 0 {
+            continue;
+        }
+        let rect = geo.note_rect(note);
+        let from_y =
+            sources[index].map_or(rect.center().y, |key| geo.y(key) + geo.row_height / 2.0);
+        let (x0, x1) = (
+            rect.left(),
+            geo.x(note.start_tick + u64::from(note.slide_ticks)),
+        );
+        if x1 < geo.grid.left() || x0 > geo.grid.right() {
+            continue;
+        }
+        // Drawn with the RC curve the synth glides along.
+        let curve: Vec<Pos2> = (0..=16)
+            .map(|step| {
+                let t = step as f32 / 16.0;
+                let shape = (1.0 - (-4.6 * t).exp()) / (1.0 - (-4.6_f32).exp());
+                pos2(
+                    x0 + (x1 - x0) * t,
+                    from_y + (rect.center().y - from_y) * shape,
+                )
+            })
+            .collect();
+        painter.add(egui::Shape::line(
+            curve,
+            Stroke::new(2.0, theme::tint(color, Color32::WHITE, 0.6)),
+        ));
+    }
     for (index, note) in notes.iter().enumerate() {
         let rect = geo.note_rect(note);
         if !rect.intersects(geo.grid) {
@@ -1496,8 +2051,22 @@ fn paint_notes(
                 theme::TEXT_ON_COLOR,
             );
         }
+        if selected.contains(&index) {
+            let handle = slide_handle(geo, note);
+            painter.circle_filled(handle, 3.5, Color32::WHITE);
+            painter.circle_stroke(
+                handle,
+                3.5,
+                Stroke::new(1.0, Color32::from_black_alpha(200)),
+            );
+        }
+        let slide = if note.slide_ticks > 0 {
+            format!(" · slide {}", note.slide_ticks)
+        } else {
+            String::new()
+        };
         response.on_hover_text(format!(
-            "{} · tick {} · length {} · velocity {} · channel {}",
+            "{} · tick {} · length {} · velocity {} · channel {}{slide}",
             format::note_name(note.key),
             note.start_tick,
             note.duration_ticks,
@@ -1617,6 +2186,7 @@ mod tests {
             key,
             velocity: 79,
             channel: 6,
+            slide_ticks: 0,
         }
     }
 
@@ -1680,6 +2250,8 @@ mod tests {
                         start_tick: 0,
                         length_ticks: 3840,
                         notes,
+                        name: None,
+                        pitch_bend: Vec::new(),
                     },
                 )
                 .unwrap();
@@ -1775,6 +2347,152 @@ mod tests {
         }
     }
 
+    fn rect_of(harness: &PianoHarness, id: Id) -> Rect {
+        harness
+            .ctx
+            .read_response(id)
+            .unwrap_or_else(|| panic!("no widget {id:?}"))
+            .rect
+    }
+
+    fn drag(harness: &mut PianoHarness, from: Pos2, to: Pos2) -> Vec<Action> {
+        harness.step(vec![egui::Event::PointerMoved(from)]);
+        harness.button(from, true);
+        let mut actions = Vec::new();
+        for step in 1..=6 {
+            let point = from + (to - from) * (step as f32 / 6.0);
+            actions.extend(harness.step(vec![egui::Event::PointerMoved(point)]));
+        }
+        actions.extend(harness.button(to, false));
+        actions
+    }
+
+    #[test]
+    fn dragging_the_slide_handle_sets_a_slide_without_moving_the_note() {
+        let mut harness = PianoHarness::new(60);
+        let note_rect = rect_of(&harness, Id::new(("piano-note", 0)));
+        harness.button(note_rect.center(), true);
+        harness.button(note_rect.center(), false);
+        harness.step(Vec::new());
+        let handle = pos2(note_rect.left() + 2.0, note_rect.top());
+        let actions = drag(
+            &mut harness,
+            handle,
+            handle + vec2(note_rect.width() / 2.0, 0.0),
+        );
+        let edited = actions
+            .iter()
+            .find_map(|action| match action {
+                Action::EditMidiNotes { notes, label, .. } => Some((notes.clone(), *label)),
+                _ => None,
+            })
+            .expect("the slide drag commits an edit");
+        assert_eq!(edited.1, "Set MIDI note slide");
+        let note = edited.0[0];
+        assert_eq!(
+            (note.start_tick, note.duration_ticks, note.key),
+            (960, 480, 60)
+        );
+        assert!(
+            (200..=280).contains(&note.slide_ticks),
+            "slide {}",
+            note.slide_ticks
+        );
+    }
+
+    #[test]
+    fn drawing_in_the_bend_lane_commits_a_thinned_curve() {
+        let mut harness = PianoHarness::new(60);
+        let tab = rect_of(&harness, Id::new(("piano-lane", 1_usize)));
+        harness.button(tab.center(), true);
+        harness.button(tab.center(), false);
+        harness.step(Vec::new());
+        assert_eq!(harness.state.lane, Lane::Bend);
+        let lane = rect_of(&harness, Id::new("piano-velocity-lane"));
+        let from = pos2(lane.left() + 40.0, lane.center().y);
+        let to = pos2(lane.left() + 240.0, lane.top() + 4.0);
+        let actions = drag(&mut harness, from, to);
+        let points = actions
+            .iter()
+            .find_map(|action| match action {
+                Action::EditMidiPitchBend { points, before, .. } => {
+                    assert!(before.is_empty());
+                    Some(points.clone())
+                }
+                _ => None,
+            })
+            .expect("drawing commits a bend");
+        assert!(points.len() >= 2);
+        assert!(points.windows(2).all(|pair| pair[0].tick < pair[1].tick));
+        assert_eq!(points[0].value, 0);
+        assert!(points.last().unwrap().value > 7000);
+        // A straight stroke thins to its corners, not one point per pixel.
+        assert!(points.len() <= 4, "{points:?}");
+    }
+
+    #[test]
+    fn bend_lane_maps_values_symmetrically_and_snaps_to_centre() {
+        let lane = Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 112.0));
+        for value in [BEND_MIN, -4096, 0, 4096, BEND_MAX] {
+            let back = bend_value(lane, bend_y(lane, value));
+            assert!(
+                (i32::from(back) - i32::from(value)).abs() <= 100,
+                "{value} -> {back}"
+            );
+        }
+        assert_eq!(bend_value(lane, lane.center().y + 2.0), 0);
+    }
+
+    #[test]
+    fn strokes_replace_only_the_points_they_cover() {
+        let original = vec![
+            BendPoint {
+                tick: 0,
+                value: 100,
+            },
+            BendPoint {
+                tick: 500,
+                value: 200,
+            },
+            BendPoint {
+                tick: 2000,
+                value: 300,
+            },
+        ];
+        let stroke = vec![
+            BendPoint {
+                tick: 900,
+                value: 0,
+            },
+            BendPoint {
+                tick: 400,
+                value: 1000,
+            },
+        ];
+        let merged = merge_stroke(&original, &stroke);
+        assert_eq!(
+            merged,
+            vec![
+                BendPoint {
+                    tick: 0,
+                    value: 100
+                },
+                BendPoint {
+                    tick: 400,
+                    value: 1000
+                },
+                BendPoint {
+                    tick: 900,
+                    value: 0
+                },
+                BendPoint {
+                    tick: 2000,
+                    value: 300
+                },
+            ]
+        );
+    }
+
     #[test]
     fn command_drag_copies_selected_notes_and_keeps_originals_visible() {
         let original = vec![note(960, 480, 60), note(120, 240, 65), note(1680, 240, 64)];
@@ -1852,6 +2570,68 @@ mod tests {
                 .unwrap();
             harness.state.notes_committed();
             assert_eq!(harness.state.selected, BTreeSet::from([3, 4]));
+        }
+    }
+
+    #[test]
+    fn command_state_at_drop_decides_between_moving_and_duplicating_notes() {
+        let command = Modifiers {
+            command: true,
+            mac_cmd: true,
+            ..Modifiers::NONE
+        };
+        let original = vec![note(960, 480, 60), note(1680, 240, 64)];
+        for release_before_drop in [false, true] {
+            let mut harness = PianoHarness::with_notes(original.clone());
+            let start = harness
+                .ctx
+                .read_response(Id::new(("piano-note", 0_usize)))
+                .unwrap()
+                .rect
+                .center();
+            harness.step(vec![egui::Event::PointerMoved(start)]);
+            harness.button_with_modifiers(start, true, Modifiers::NONE);
+            let end = start + vec2((480.0 * harness.state.pixels_per_tick) as f32, 0.0);
+            harness.step(vec![egui::Event::PointerMoved(end)]);
+            let copied = |harness: &PianoHarness| {
+                let drag = harness.state.drag.as_ref().unwrap();
+                drag.copied_notes(&harness.state.selected)
+            };
+            assert_eq!(copied(&harness), None);
+
+            harness.step_with_modifiers(Vec::new(), command);
+            let mut duplicated = original.clone();
+            duplicated.push(note(1440, 480, 60));
+            assert_eq!(copied(&harness), Some(duplicated.clone()));
+
+            let drop_modifiers = if release_before_drop {
+                harness.step_with_modifiers(Vec::new(), Modifiers::NONE);
+                assert_eq!(copied(&harness), None);
+                Modifiers::NONE
+            } else {
+                command
+            };
+            let actions = harness.button_with_modifiers(end, false, drop_modifiers);
+            let [
+                Action::ReleaseMidiAudition,
+                Action::EditMidiNotes {
+                    before,
+                    notes,
+                    label,
+                    ..
+                },
+            ] = actions.as_slice()
+            else {
+                panic!("expected release and one edit, got {actions:?}");
+            };
+            assert_eq!(before, &original);
+            if release_before_drop {
+                assert_eq!(notes, &[note(1440, 480, 60), note(1680, 240, 64)]);
+                assert_eq!(*label, "Move MIDI notes");
+            } else {
+                assert_eq!(notes, &duplicated);
+                assert_eq!(*label, "Duplicate MIDI notes");
+            }
         }
     }
 
@@ -1993,6 +2773,7 @@ mod tests {
                         key,
                         velocity: 83,
                         channel: 3,
+                        slide_ticks: 0,
                     }],
                 }]
             );
@@ -2121,6 +2902,8 @@ mod tests {
                                         start_tick: 3840,
                                         length_ticks: 3840,
                                         notes: vec![note(0, 240, 67)],
+                                        name: None,
+                                        pitch_bend: Vec::new(),
                                     },
                                 )
                                 .unwrap();

@@ -29,7 +29,7 @@ impl SympoieApp {
             ),
             (
                 KeyboardShortcut::new(command_shift, Key::R),
-                Action::ExportAudio { loop_only: false },
+                Action::ShowExport,
             ),
             (
                 KeyboardShortcut::new(command_shift, Key::T),

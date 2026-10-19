@@ -35,7 +35,13 @@ pub struct Shared {
     pitch_error: Mutex<Option<String>>,
     preparing_pitch: AtomicBool,
     shutdown: AtomicBool,
+    /// Finished offline instrument renders to play instead of their instruments' notes,
+    /// with a generation the render thread watches for changes.
+    instrument_renders: Mutex<Arc<InstrumentRenders>>,
+    renders_generation: AtomicU64,
 }
+
+pub type InstrumentRenders = Vec<(u64, Arc<[Frame]>)>;
 
 impl Shared {
     fn new() -> Self {
@@ -49,6 +55,8 @@ impl Shared {
             pitch_error: Mutex::new(None),
             preparing_pitch: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
+            instrument_renders: Mutex::new(Arc::new(Vec::new())),
+            renders_generation: AtomicU64::new(0),
         }
     }
 
@@ -244,6 +252,19 @@ impl AudioEngine {
 
     pub fn is_preparing_pitch(&self) -> bool {
         self.shared.preparing_pitch.load(Ordering::Relaxed)
+    }
+
+    /// Plays these finished offline renders, keyed by plug-in instrument id, in place of
+    /// those instruments' notes; every other instrument plays live.
+    pub fn set_instrument_renders(&self, renders: InstrumentRenders) {
+        *self
+            .shared
+            .instrument_renders
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Arc::new(renders);
+        self.shared
+            .renders_generation
+            .fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn update_project(&self, project: Project) {
@@ -689,6 +710,7 @@ fn run(
 
     let mut block = [[0.0; 2]; CHUNK_FRAMES];
     let mut pending: Option<Message> = None;
+    let mut applied_renders = None;
     loop {
         if shared.shutdown.load(Ordering::Acquire) {
             return Next::Shutdown;
@@ -869,6 +891,17 @@ fn run(
             }
         }
 
+        let renders = shared.renders_generation.load(Ordering::Acquire);
+        if applied_renders != Some(renders) {
+            let list = Arc::clone(
+                &shared
+                    .instrument_renders
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner),
+            );
+            transport.set_instrument_renders(&list);
+            applied_renders = Some(renders);
+        }
         let monitoring = transport.has_live_plugins() || transport.has_auditions();
         if transport.state() == PlaybackState::Playing || transition.is_some() || monitoring {
             while shared.ring.buffered() < TARGET_BUFFERED_FRAMES
@@ -1322,6 +1355,7 @@ mod tests {
                         pitch_semitones: 0.0,
                         pitch_algorithm: Default::default(),
                         preserve_formants: false,
+                        name: None,
                     },
                 )
                 .unwrap();
@@ -1379,6 +1413,7 @@ mod tests {
                     pitch_semitones: 0.0,
                     pitch_algorithm: Default::default(),
                     preserve_formants: false,
+                    name: None,
                 },
             )
             .unwrap();
@@ -1402,7 +1437,10 @@ mod tests {
                         key: 60,
                         velocity: 100,
                         channel: 0,
+                        slide_ticks: 0,
                     }],
+                    name: None,
+                    pitch_bend: Vec::new(),
                 },
             )
             .unwrap();
@@ -1430,6 +1468,7 @@ mod tests {
                         pitch_semitones: 0.0,
                         pitch_algorithm: Default::default(),
                         preserve_formants: false,
+                        name: None,
                     },
                 )
                 .unwrap();
@@ -1952,7 +1991,10 @@ mod tests {
                         key: 24,
                         velocity: 127,
                         channel: 0,
+                        slide_ticks: 0,
                     }],
+                    name: None,
+                    pitch_bend: Vec::new(),
                 },
             )
             .unwrap();
@@ -2038,7 +2080,10 @@ mod tests {
                         key: 12,
                         velocity: 127,
                         channel: 0,
+                        slide_ticks: 0,
                     }],
+                    name: None,
+                    pitch_bend: Vec::new(),
                 },
             )
             .unwrap();
@@ -2056,6 +2101,7 @@ mod tests {
                     pitch_semitones: 0.0,
                     pitch_algorithm: Default::default(),
                     preserve_formants: false,
+                    name: None,
                 },
             )
             .unwrap();
@@ -2118,6 +2164,7 @@ mod tests {
                     pitch_semitones: 0.0,
                     pitch_algorithm: Default::default(),
                     preserve_formants: false,
+                    name: None,
                 },
             )
             .unwrap();
@@ -2202,6 +2249,7 @@ mod tests {
                     pitch_semitones: 0.0,
                     pitch_algorithm: Default::default(),
                     preserve_formants: false,
+                    name: None,
                 },
             )
             .unwrap();
@@ -2276,7 +2324,10 @@ mod tests {
                         key: 64,
                         velocity: 127,
                         channel: 0,
+                        slide_ticks: 0,
                     }],
+                    name: None,
+                    pitch_bend: Vec::new(),
                 },
             )
             .unwrap();
@@ -2427,6 +2478,7 @@ mod tests {
                     key: 72,
                     velocity: 100,
                     channel: 0,
+                    slide_ticks: 0,
                 }],
             );
             synchronize_messages(&engine);
@@ -2468,6 +2520,7 @@ mod tests {
                     key: 72,
                     velocity: 100,
                     channel: 0,
+                    slide_ticks: 0,
                 }],
             );
             synchronize_messages(&engine);
@@ -2513,6 +2566,7 @@ mod tests {
                 key: 72,
                 velocity: 100,
                 channel: 0,
+                slide_ticks: 0,
             }],
         );
         synchronize_messages(&engine);
@@ -2570,6 +2624,7 @@ mod tests {
             key: 72,
             velocity: 100,
             channel: 0,
+            slide_ticks: 0,
         };
         engine.audition_notes(1, vec![note]);
         synchronize_messages(&engine);
@@ -2617,6 +2672,7 @@ mod tests {
                 key: 84,
                 velocity: 100,
                 channel: 2,
+                slide_ticks: 0,
             }],
         );
         synchronize_messages(&engine);

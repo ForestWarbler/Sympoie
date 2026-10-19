@@ -42,6 +42,7 @@ fn audio(project: &mut Project) -> AudioTrackId {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -333,11 +334,11 @@ fn constant_plugin_automation_reasserts_after_native_gestures_and_restores_each_
     shared[0].store(0.8_f64.to_bits(), Ordering::Relaxed);
     assert!(renderer.update_parameters(&edited));
     renderer.render_block(128, &mut output);
-    assert_eq!(output, [[0.5, 0.25]; 64]);
+    assert_eq!(output, [[0.8, 0.25]; 64], "the stored edit trims the lane");
     renderer.render_monitor_block(192, &mut output);
     assert_eq!(output, [[0.8, 0.75]; 64]);
     renderer.render_block(192, &mut output);
-    assert_eq!(output, [[0.5, 0.25]; 64]);
+    assert_eq!(output, [[0.8, 0.25]; 64]);
 
     edited.set_plugin_parameter(plugin, 7, 0.5).unwrap();
     edited.remove_track_automation(track, target).unwrap();
@@ -506,7 +507,10 @@ fn builtin_gain_automation_is_block_independent_and_live_disable_restores_base()
                     key: 60,
                     velocity: 127,
                     channel: 0,
+                    slide_ticks: 0,
                 }],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();

@@ -22,6 +22,7 @@ fn audio_fixture() -> (Project, AudioTrackId) {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -133,7 +134,10 @@ fn unmuting_a_group_preserves_held_instrument_phase() {
                     key: 12,
                     velocity: 127,
                     channel: 0,
+                    slide_ticks: 0,
                 }],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();

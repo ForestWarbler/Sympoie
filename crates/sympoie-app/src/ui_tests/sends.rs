@@ -158,7 +158,7 @@ fn bounce_keeps_sends_editable_and_does_not_bake_bus_returns_into_the_clip() {
         panic!("bounced track missing")
     };
     assert_eq!(track.clips().len(), 1);
-    let clip = track.clips()[0];
+    let clip = track.clips()[0].clone();
     let audio = harness.project().audio_asset(clip.asset).unwrap();
     assert_eq!(audio.samples()[0], [0.25; 2]);
     assert_eq!(harness.project().tracks()[3].name(), "Reverb");

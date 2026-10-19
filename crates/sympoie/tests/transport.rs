@@ -26,6 +26,7 @@ fn project_with_samples(frame_count: usize) -> Project {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -106,7 +107,10 @@ fn free_play_renders_instrument_release_then_continues_through_silence() {
                     key: 60,
                     velocity: 100,
                     channel: 0,
+                    slide_ticks: 0,
                 }],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -620,7 +624,10 @@ fn unassigned_midi_does_not_block_audio_playback_or_extend_its_duration() {
                     key: 60,
                     velocity: 100,
                     channel: 0,
+                    slide_ticks: 0,
                 }],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();

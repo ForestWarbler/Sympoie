@@ -133,6 +133,10 @@ pub enum Action {
         clip: ClipRef,
         gain: f32,
     },
+    RenameClip {
+        clip: ClipRef,
+        name: String,
+    },
     SetClipPitch {
         clip: ClipRef,
         semitones: f32,
@@ -169,6 +173,12 @@ pub enum Action {
         notes: Vec<MidiNote>,
         label: &'static str,
     },
+    EditMidiPitchBend {
+        clip: ClipRef,
+        before: Vec<sympoie::clip::BendPoint>,
+        points: Vec<sympoie::clip::BendPoint>,
+        label: &'static str,
+    },
     ImportAudio {
         paths: Vec<PathBuf>,
         track: Option<usize>,
@@ -197,9 +207,10 @@ pub enum Action {
     OpenPath(PathBuf),
     Save,
     SaveAs,
-    ExportAudio {
-        loop_only: bool,
-    },
+    ShowExport,
+    ExportAll,
+    ExportClipMidi(ClipRef),
+    ExportClipAudio(ClipRef),
     Undo,
     Redo,
     Quit,
@@ -236,6 +247,10 @@ pub enum Action {
     ResetBuiltinParameters {
         id: u64,
     },
+    LoadBuiltinPreset {
+        id: u64,
+        preset: usize,
+    },
     SetVst3Bypassed {
         id: u64,
         bypassed: bool,
@@ -267,6 +282,9 @@ pub enum Action {
     OpenVst3Editor(u64),
     CloseVst3Editor(u64),
     OpenNativeVst3Editor(u64),
+    /// Open the before/after waveform and spectrum window of a built-in device.
+    OpenBuiltinScope(u64),
+    CloseBuiltinScope(u64),
     ShowDevices,
     CloseDrawer,
     ShowClipView,

@@ -256,7 +256,8 @@ pub fn apply_bounce(
         bounced.automation_mut().push(
             AutomationLane::new(target, lane.points().to_vec())
                 .map_err(|error| error.to_string())?
-                .with_enabled(lane.enabled()),
+                .with_enabled(lane.enabled())
+                .with_anchor(lane.anchor()),
         );
     }
 
@@ -276,6 +277,7 @@ pub fn apply_bounce(
         pitch_semitones: 0.0,
         pitch_algorithm: Default::default(),
         preserve_formants: false,
+        name: None,
     });
     let mut mapping = vec![None; project.tracks().len()];
     let mut tracks =
@@ -420,6 +422,78 @@ fn dependencies(
         }
     }
     needed
+}
+
+/// One MIDI track's instrument isolated for an offline render of its own: like a bounce,
+/// but also without the track's insert effects and at unity gain, so the result can stand
+/// in for the instrument's realtime output inside the unchanged track.
+#[derive(Debug, Clone)]
+pub struct InstrumentRenderPlan {
+    pub project: Project,
+    pub track_index: usize,
+    /// The render covers frames 0..end_frame, so it lines up with the timeline.
+    pub end_frame: u64,
+}
+
+impl InstrumentRenderPlan {
+    /// `None` when the track has no notes to render.
+    pub fn new(source: &Project, track_index: usize) -> Result<Option<Self>, String> {
+        let Some(Track::Midi(track)) = source.tracks().get(track_index) else {
+            return Err("The track is not a MIDI track.".into());
+        };
+        if track
+            .clips()
+            .iter()
+            .all(|clip| clip.audible_notes().next().is_none())
+        {
+            return Ok(None);
+        }
+        let mut plan = BouncePlan::new(source, track_index)?;
+        let target = &mut plan.project.tracks_mut()[track_index];
+        let effects: Vec<u64> = target.effects().iter().map(|effect| effect.id).collect();
+        target.effects_mut().clear();
+        target.automation_mut().retain(|lane| {
+            !matches!(lane.target(), AutomationTarget::PluginParameter { plugin, .. }
+                if effects.contains(&plugin))
+        });
+        plan.project
+            .processing_order()
+            .map_err(|error| error.to_string())?;
+        Ok(Some(Self {
+            project: plan.project,
+            track_index,
+            end_frame: plan.end_frame,
+        }))
+    }
+}
+
+/// A fingerprint of everything an instrument render of `track_index` depends on: the
+/// track's clips (notes, slides, bends), its plug-in instrument's parameters, state and
+/// bypass, the automation of that instrument, and the tempo. Equal keys mean a finished
+/// render is still valid.
+pub fn instrument_render_key(project: &Project, track_index: usize) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let Track::Midi(track) = project.tracks().get(track_index)? else {
+        return None;
+    };
+    let plugin = track.plugin_instrument()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    project.tempo().bpm().to_bits().hash(&mut hasher);
+    format!("{:?}", track.clips()).hash(&mut hasher);
+    plugin.id.hash(&mut hasher);
+    plugin.bypassed.hash(&mut hasher);
+    plugin.state.hash(&mut hasher);
+    for parameter in &plugin.parameters {
+        parameter.id.hash(&mut hasher);
+        parameter.value.to_bits().hash(&mut hasher);
+    }
+    for lane in track.automation() {
+        if matches!(lane.target(), AutomationTarget::PluginParameter { plugin: id, .. } if id == plugin.id)
+        {
+            format!("{lane:?}").hash(&mut hasher);
+        }
+    }
+    Some(hasher.finish())
 }
 
 fn is_mixer_effect_target(track: &Track, target: AutomationTarget) -> bool {

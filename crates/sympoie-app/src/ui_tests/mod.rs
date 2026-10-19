@@ -33,6 +33,8 @@ mod builtin_devices;
 
 mod rack_visibility;
 
+mod export;
+
 struct Harness {
     ctx: egui::Context,
     app: SympoieApp,
@@ -104,7 +106,7 @@ fn q_does_not_record_while_typing_a_track_name() {
 fn audio_reverse_shortcut_and_context_menu_restore_the_original() {
     let mut harness = Harness::with_two_clips();
     let clip = ClipRef { track: 2, index: 0 };
-    let original = *crate::document::edit::audio_clip(harness.project(), clip).unwrap();
+    let original = (crate::document::edit::audio_clip(harness.project(), clip).unwrap()).clone();
     let samples = harness
         .project()
         .audio_asset(original.asset)
@@ -113,7 +115,7 @@ fn audio_reverse_shortcut_and_context_menu_restore_the_original() {
         .to_vec();
     harness.dispatch(Action::SelectClip(Some(clip)));
     harness.key(Key::R, Modifiers::NONE);
-    let reversed = *crate::document::edit::audio_clip(harness.project(), clip).unwrap();
+    let reversed = (crate::document::edit::audio_clip(harness.project(), clip).unwrap()).clone();
     assert_eq!(reversed.frame_count, original.frame_count);
     assert_eq!(
         harness
@@ -152,7 +154,7 @@ fn audio_reverse_shortcut_and_context_menu_restore_the_original() {
 fn audio_reverse_time_selection_changes_only_the_middle_and_undoes_once() {
     let mut harness = Harness::with_two_clips();
     let clip = ClipRef { track: 2, index: 0 };
-    let original = *crate::document::edit::audio_clip(harness.project(), clip).unwrap();
+    let original = (crate::document::edit::audio_clip(harness.project(), clip).unwrap()).clone();
     let samples = harness
         .project()
         .audio_asset(original.asset)
@@ -234,7 +236,7 @@ fn audio_pitch_control_sets_fractional_semitones_and_reset_is_undoable() {
     harness.step(vec![Event::Text("7.25".to_owned())]);
     harness.key(Key::Enter, Modifiers::NONE);
     harness.steps(2);
-    let audio = *crate::document::edit::audio_clip(harness.project(), clip).unwrap();
+    let audio = (crate::document::edit::audio_clip(harness.project(), clip).unwrap()).clone();
     assert_eq!(audio.pitch_semitones, 7.25);
     assert_eq!(audio.frame_count, 48_000);
     let reset = harness.labelled("Reset");
@@ -266,7 +268,7 @@ fn audio_pitch_algorithm_context_controls_support_ab_comparison_and_undo() {
 
     let mut harness = Harness::with_two_clips();
     let clip = ClipRef { track: 2, index: 0 };
-    let original = *crate::document::edit::audio_clip(harness.project(), clip).unwrap();
+    let original = (crate::document::edit::audio_clip(harness.project(), clip).unwrap()).clone();
     assert_eq!(original.pitch_algorithm, PitchAlgorithm::Signalsmith);
     assert!(original.preserve_formants);
     harness.dispatch(Action::SetClipPitch {
@@ -277,7 +279,7 @@ fn audio_pitch_algorithm_context_controls_support_ab_comparison_and_undo() {
     open_pitch_menu(&mut harness);
     let rubber_band = harness.labelled(PitchAlgorithm::RubberBandR3.label());
     harness.click(rubber_band.center());
-    let changed = *crate::document::edit::audio_clip(harness.project(), clip).unwrap();
+    let changed = (crate::document::edit::audio_clip(harness.project(), clip).unwrap()).clone();
     assert_eq!(changed.pitch_algorithm, PitchAlgorithm::RubberBandR3);
     assert_eq!(changed.pitch_semitones, 7.25);
     assert_eq!(changed.frame_count, original.frame_count);
@@ -356,14 +358,14 @@ fn audio_pitch_clip_view_dropdown_changes_algorithm_without_changing_pitch() {
 fn zero_pitch_algorithm_action_is_saved_and_identical_options_do_not_add_history() {
     let mut harness = Harness::with_two_clips();
     let clip = ClipRef { track: 2, index: 0 };
-    let original = *crate::document::edit::audio_clip(harness.project(), clip).unwrap();
+    let original = (crate::document::edit::audio_clip(harness.project(), clip).unwrap()).clone();
     let options = Action::SetClipPitchOptions {
         clip,
         algorithm: PitchAlgorithm::RubberBandR3,
         preserve_formants: false,
     };
     harness.dispatch(options.clone());
-    let changed = *crate::document::edit::audio_clip(harness.project(), clip).unwrap();
+    let changed = (crate::document::edit::audio_clip(harness.project(), clip).unwrap()).clone();
     assert_eq!(changed.pitch_algorithm, PitchAlgorithm::RubberBandR3);
     assert_eq!(changed.pitch_semitones, 0.0);
     assert!(!changed.preserve_formants);
@@ -387,7 +389,7 @@ fn audio_reverse_shortcut_is_ignored_while_typing_or_without_audio() {
     let mut harness = Harness::with_two_clips();
     let clip = ClipRef { track: 2, index: 0 };
     harness.dispatch(Action::SelectClip(Some(clip)));
-    let original = *crate::document::edit::audio_clip(harness.project(), clip).unwrap();
+    let original = (crate::document::edit::audio_clip(harness.project(), clip).unwrap()).clone();
     harness.begin_track_rename(2);
     assert!(harness.ctx.egui_wants_keyboard_input());
     harness.key(Key::R, Modifiers::NONE);
@@ -592,6 +594,7 @@ impl Harness {
                             key: 60,
                             velocity: 87,
                             channel: 3,
+                            slide_ticks: 0,
                         },
                         MidiNote {
                             start_tick: 960,
@@ -599,6 +602,7 @@ impl Harness {
                             key: 64,
                             velocity: 106,
                             channel: 5,
+                            slide_ticks: 0,
                         },
                         MidiNote {
                             start_tick: 1920,
@@ -606,8 +610,11 @@ impl Harness {
                             key: 67,
                             velocity: 52,
                             channel: 15,
+                            slide_ticks: 0,
                         },
                     ],
+                    name: None,
+                    pitch_bend: Vec::new(),
                 },
             )
             .unwrap();
@@ -665,6 +672,21 @@ impl Harness {
             }
         }
         output.textures_delta.clear();
+    }
+
+    /// What eframe does instead of a frame while the window is minimized, hidden or
+    /// covered: no ui pass, only `App::logic`.
+    fn hidden_step(&mut self) {
+        let mut input = RawInput::default();
+        input.viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                minimized: Some(true),
+                ..egui::ViewportInfo::default()
+            },
+        );
+        let app = &mut self.app;
+        let _ = self.ctx.run_logic(&input, |ctx| app.poll_while_hidden(ctx));
     }
 
     fn steps(&mut self, count: usize) {
@@ -2100,7 +2122,9 @@ fn automation_line_insertion_and_numeric_entry_are_undoable_without_seeking() {
             },
         ],
     )
-    .unwrap();
+    .unwrap()
+    // The project anchors a new lane at the control's value (unity gain).
+    .with_anchor(Some(0.5));
     harness.dispatch(Action::SetAutomation {
         track: 1,
         lane: original.clone(),
@@ -3820,7 +3844,7 @@ fn native_clip_clipboard_preserves_deleted_audio_and_ignores_unrelated_text() {
 
     let mut harness = Harness::with_two_clips();
     let source = ClipRef { track: 1, index: 0 };
-    let original = *audio_clip(harness.project(), source).unwrap();
+    let original = (audio_clip(harness.project(), source).unwrap()).clone();
     harness.click(clip_title(harness.clip_rect(1, 0)));
     harness.step(vec![Event::Copy]);
     let text = harness.clipboard.clone();
@@ -4959,6 +4983,56 @@ mod agent_mode {
     }
 
     #[test]
+    fn tools_answer_while_the_window_is_hidden() {
+        let mut harness = Harness::with_empty_project();
+        let folder = agent_project(&mut harness);
+        run_until(&mut harness, |_| {
+            folder.join(crate::mcp::DISCOVERY).is_file()
+        });
+        let file = track_file(&folder, "-bass.json");
+        let text = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(&file, text.replace("\"Bass\"", "\"Sub Bass\"")).unwrap();
+
+        let call_folder = folder.clone();
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(900));
+            crate::mcp::server::call(&call_folder, "get_context", &serde_json::json!({}))
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !worker.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the hidden window left the agent unanswered"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            harness.hidden_step();
+        }
+        let context = worker.join().unwrap().unwrap();
+        assert_eq!(context["tracks"][1]["name"], "Sub Bass");
+        assert_eq!(context["last_outside_change"], "loaded");
+    }
+
+    #[test]
+    fn turning_agent_mode_off_closes_the_tools_at_once() {
+        let mut harness = Harness::with_empty_project();
+        let folder = agent_project(&mut harness);
+        let discovery = folder.join(crate::mcp::DISCOVERY);
+        run_until(&mut harness, |_| discovery.is_file());
+        let advert = std::fs::read_to_string(&discovery).unwrap();
+
+        harness.dispatch(Action::ToggleAgentMode);
+        assert!(!discovery.exists());
+        let started = std::time::Instant::now();
+        let error =
+            crate::mcp::server::call(&folder, "get_context", &serde_json::json!({})).unwrap_err();
+        assert!(error.contains("agent mode on"), "{error}");
+        // A caller still holding the old address is refused rather than left waiting.
+        std::fs::write(&discovery, advert).unwrap();
+        crate::mcp::server::call(&folder, "get_context", &serde_json::json!({})).unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
     fn broken_files_pause_autosave_and_report_the_error() {
         let mut harness = Harness::with_empty_project();
         let folder = agent_project(&mut harness);
@@ -5139,6 +5213,7 @@ mod agent_mode {
                         key: 57,
                         velocity: 110,
                         channel: 0,
+                        slide_ticks: 0,
                     }],
                     ..MidiClip::new(0, 7680)
                 },

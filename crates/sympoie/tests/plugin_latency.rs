@@ -64,6 +64,7 @@ impl PluginProcessor for Processor {
     }
     fn event(&mut self, event: NoteEvent) {
         match event {
+            NoteEvent::PitchBend { .. } => {}
             NoteEvent::On { id, .. } => {
                 self.notes.insert(id);
             }
@@ -162,6 +163,7 @@ fn audition_after_rebuild_reaches_the_audible_block_with_long_plugin_latency() {
             key: 60,
             velocity: 100,
             channel: 0,
+            slide_ticks: 0,
         }]
     ));
     let mut output = vec![[0.0; 2]; gate + 1];
@@ -190,6 +192,7 @@ fn audition_keeps_its_audible_gate_when_short_loops_wrap_plugin_delay_storage() 
                 key: 60,
                 velocity: 100,
                 channel: 0,
+                slide_ticks: 0,
             }]
         ));
         let mut output = vec![[0.0; 2]; gate + latency as usize + 100];
@@ -223,6 +226,7 @@ fn held_preview_survives_short_loops_and_drains_delayed_audio_after_release() {
             key: 60,
             velocity: 100,
             channel: 0,
+            slide_ticks: 0,
         };
         assert!(transport.begin_audition_notes(1, &[note]));
         let mut held = vec![[0.0; 2]; sympoie::SAMPLE_RATE as usize * 2];
@@ -241,6 +245,8 @@ fn held_preview_survives_short_loops_and_drains_delayed_audio_after_release() {
                     offset_ticks: 0,
                     length_ticks: 960,
                     notes: vec![note],
+                    name: None,
+                    pitch_bend: Vec::new(),
                 },
             )
             .unwrap();
@@ -296,6 +302,7 @@ fn add_audio(project: &mut Project, samples: Vec<Frame>) -> AudioTrackId {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -447,7 +454,10 @@ fn instrument_latency_and_loop_seek_transport_positions_are_compensated() {
                     key: 60,
                     velocity: 127,
                     channel: 0,
+                    slide_ticks: 0,
                 }],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -673,7 +683,10 @@ fn delayed_instrument_notes_at_loop_end_survive_lookahead_schedule_wraps() {
                     key: 60,
                     velocity: 127,
                     channel: 0,
+                    slide_ticks: 0,
                 }],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -711,7 +724,10 @@ fn direct_renderer_seek_resets_instruments_even_when_preroll_meets_the_old_input
                     key: 60,
                     velocity: 127,
                     channel: 0,
+                    slide_ticks: 0,
                 }],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();

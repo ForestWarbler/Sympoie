@@ -73,6 +73,7 @@ fn fixture() -> Project {
                     pitch_semitones: pitch,
                     pitch_algorithm: algorithm,
                     preserve_formants: formants,
+                    name: None,
                 },
             )
             .unwrap();
@@ -104,7 +105,7 @@ fn assert_preserved(original: &Project, loaded: &Project) {
 fn all_pitch_algorithms_and_formant_options_round_trip_with_trimmed_sources() {
     let project = fixture();
     let bytes = encoded(&project);
-    assert_eq!(&bytes[8..12], &13_u32.to_le_bytes());
+    assert_eq!(&bytes[8..12], &16_u32.to_le_bytes());
     assert_preserved(&project, &read_project(bytes.as_slice()).unwrap());
 
     let temp = TestDirectory::new();
@@ -208,7 +209,7 @@ fn assert_original_pitch(project: &Project) {
     let Track::Audio(audio) = &project.tracks()[1] else {
         panic!("expected audio track");
     };
-    let clip = audio.clips()[0];
+    let clip = audio.clips()[0].clone();
     assert_eq!(clip.pitch_semitones, 0.0);
     assert_eq!(clip.pitch_algorithm, PitchAlgorithm::Builtin);
     assert!(!clip.preserve_formants);
@@ -234,7 +235,7 @@ fn versions_one_through_eight_load_audio_clips_at_original_pitch_and_upgrade_los
 }
 
 #[test]
-fn version_eight_directory_loads_at_original_pitch_and_saves_as_version_thirteen() {
+fn version_eight_directory_loads_at_original_pitch_and_saves_as_current_version() {
     let temp = TestDirectory::new();
     save_project_directory(&fixture(), &temp.0).unwrap();
     let sample = fs::read_dir(temp.0.join("samples"))
@@ -255,7 +256,7 @@ fn version_eight_directory_loads_at_original_pitch_and_saves_as_version_thirteen
     assert_original_pitch(&load_project(&temp.0).unwrap());
     assert_eq!(
         &fs::read(temp.0.join(PROJECT_MANIFEST)).unwrap()[8..12],
-        &13_u32.to_le_bytes()
+        &16_u32.to_le_bytes()
     );
 }
 

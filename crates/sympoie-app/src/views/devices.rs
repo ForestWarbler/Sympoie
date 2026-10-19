@@ -996,7 +996,7 @@ fn builtin_card(
                             }
                         }
                     }
-                    if kind == BuiltinKind::Comp {
+                    if matches!(kind, BuiltinKind::Comp | BuiltinKind::VariMu) {
                         let chip = Rect::from_min_max(
                             pos2(controls_left - 36.0, title.top() + 3.0),
                             pos2(controls_left - 4.0, title.bottom() - 2.0),
@@ -1027,9 +1027,21 @@ fn builtin_card(
                             ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
                         }
                     }
+                    if builtin_devices::has_panel(kind) && handle.double_clicked() {
+                        actions.push(Action::OpenNativeVst3Editor(plugin.id));
+                    }
                     handle.context_menu(|ui| {
-                        if ui.button("Open in window").clicked() {
+                        let open = if builtin_devices::has_panel(kind) {
+                            "Open panel"
+                        } else {
+                            "Open in window"
+                        };
+                        if ui.button(open).clicked() {
                             actions.push(Action::OpenNativeVst3Editor(plugin.id));
+                            ui.close();
+                        }
+                        if builtin_devices::has_scope(kind) && ui.button("Open scope").clicked() {
+                            actions.push(Action::OpenBuiltinScope(plugin.id));
                             ui.close();
                         }
                         if ui.button("Reset controls").clicked() {
@@ -1279,6 +1291,56 @@ pub fn vst3_editor_viewport_id(id: u64) -> egui::ViewportId {
     egui::ViewportId::from_hash_of(("vst3-parameters", id))
 }
 
+pub fn vst3_editor_title(plugin: &PluginInstance) -> String {
+    if BuiltinKind::from_descriptor(&plugin.descriptor).is_some() {
+        plugin.descriptor.name.clone()
+    } else {
+        format!("{} · Parameters", plugin.descriptor.name)
+    }
+}
+
+pub fn builtin_scope_title(plugin: &PluginInstance) -> String {
+    format!("{} · Scope", plugin.descriptor.name)
+}
+
+pub fn builtin_scope_viewport_id(id: u64) -> egui::ViewportId {
+    egui::ViewportId::from_hash_of(("builtin-scope", id))
+}
+
+/// Before/after waveform and spectrum window of a built-in device.
+pub fn show_builtin_scope(
+    ctx: &egui::Context,
+    project: &Project,
+    runtime: &PluginRuntime,
+    id: u64,
+    actions: &mut Vec<Action>,
+) {
+    let Some(plugin) = project.plugin(id) else {
+        return;
+    };
+    let Some(kind) = BuiltinKind::from_descriptor(&plugin.descriptor) else {
+        return;
+    };
+    let telemetry = runtime.builtin_telemetry(id);
+    ctx.show_viewport_immediate(
+        builtin_scope_viewport_id(id),
+        egui::ViewportBuilder::default()
+            .with_active(false)
+            .with_title(builtin_scope_title(plugin))
+            .with_inner_size([980.0, 620.0])
+            .with_min_inner_size([680.0, 440.0]),
+        |ui, class| {
+            if class != egui::ViewportClass::EmbeddedWindow {
+                editor_shortcuts(ui.ctx(), actions);
+                if ui.input(|i| i.viewport().close_requested()) {
+                    actions.push(Action::CloseBuiltinScope(id));
+                }
+            }
+            builtin_devices::scope(ui, plugin, kind, telemetry.as_deref(), actions);
+        },
+    );
+}
+
 #[cfg(test)]
 pub fn show_vst3_editor(
     ctx: &egui::Context,
@@ -1315,11 +1377,7 @@ fn show_parameter_editor(
         vst3_editor_viewport_id(id),
         egui::ViewportBuilder::default()
             .with_active(false)
-            .with_title(if builtin.is_some() {
-                plugin.descriptor.name.clone()
-            } else {
-                format!("{} · Parameters", plugin.descriptor.name)
-            })
+            .with_title(vst3_editor_title(plugin))
             .with_inner_size(builtin.map_or([540.0, 560.0], builtin_devices::editor_size))
             .with_min_inner_size(
                 builtin.map_or([380.0, 280.0], builtin_devices::minimum_editor_size),

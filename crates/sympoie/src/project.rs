@@ -586,6 +586,17 @@ impl Project {
                 .checked_add(note.duration_ticks)
                 .ok_or(ProjectError::MidiNoteRangeOverflow { note: index })?;
         }
+        if clip
+            .pitch_bend
+            .windows(2)
+            .any(|pair| pair[0].tick >= pair[1].tick)
+            || clip
+                .pitch_bend
+                .iter()
+                .any(|point| point.value < crate::clip::BEND_MIN)
+        {
+            return Err(ProjectError::InvalidPitchBend);
+        }
         Ok(())
     }
 
@@ -595,7 +606,7 @@ impl Project {
         index: usize,
         start_tick: u64,
     ) -> Result<(), ProjectError> {
-        let mut clip = *self.audio_clip(track, index)?;
+        let mut clip = self.audio_clip(track, index)?.clone();
         clip.start_tick = self.snap_tick(start_tick)?;
         self.replace_audio_clip(track, index, clip)
     }
@@ -606,7 +617,7 @@ impl Project {
         index: usize,
         semitones: f32,
     ) -> Result<(), ProjectError> {
-        let mut clip = *self.audio_clip(track, index)?;
+        let mut clip = self.audio_clip(track, index)?.clone();
         clip.pitch_semitones = semitones;
         self.replace_audio_clip(track, index, clip)
     }
@@ -618,7 +629,7 @@ impl Project {
         algorithm: PitchAlgorithm,
         preserve_formants: bool,
     ) -> Result<(), ProjectError> {
-        let mut clip = *self.audio_clip(track, index)?;
+        let mut clip = self.audio_clip(track, index)?.clone();
         clip.pitch_algorithm = algorithm;
         clip.preserve_formants = preserve_formants;
         self.replace_audio_clip(track, index, clip)
@@ -646,13 +657,25 @@ impl Project {
         self.replace_midi_clip(track, index, clip)
     }
 
+    /// Replaces a clip's bend lane; points must be sorted by strictly increasing tick.
+    pub fn set_midi_clip_pitch_bend(
+        &mut self,
+        track: MidiTrackId,
+        index: usize,
+        points: Vec<crate::clip::BendPoint>,
+    ) -> Result<(), ProjectError> {
+        let mut clip = self.midi_clip(track, index)?.clone();
+        clip.pitch_bend = points;
+        self.replace_midi_clip(track, index, clip)
+    }
+
     pub fn trim_audio_clip_end(
         &mut self,
         track: AudioTrackId,
         index: usize,
         end_tick: u64,
     ) -> Result<(), ProjectError> {
-        let mut clip = *self.audio_clip(track, index)?;
+        let mut clip = self.audio_clip(track, index)?.clone();
         let end_frame = self.tempo.ticks_to_frames(self.snap_tick(end_tick)?)?;
         clip.frame_count = end_frame
             .checked_sub(self.audio_clip_start_frame(&clip))
@@ -680,9 +703,31 @@ impl Project {
         index: usize,
         gain: f32,
     ) -> Result<(), ProjectError> {
-        let mut clip = *self.audio_clip(track, index)?;
+        let mut clip = self.audio_clip(track, index)?.clone();
         clip.gain = gain;
         self.replace_audio_clip(track, index, clip)
+    }
+
+    pub fn set_audio_clip_name(
+        &mut self,
+        track: AudioTrackId,
+        index: usize,
+        name: Option<&str>,
+    ) -> Result<(), ProjectError> {
+        let mut clip = self.audio_clip(track, index)?.clone();
+        clip.name = name.and_then(crate::clip::normalized_clip_name);
+        self.replace_audio_clip(track, index, clip)
+    }
+
+    pub fn set_midi_clip_name(
+        &mut self,
+        track: MidiTrackId,
+        index: usize,
+        name: Option<&str>,
+    ) -> Result<(), ProjectError> {
+        let mut clip = self.midi_clip(track, index)?.clone();
+        clip.name = name.and_then(crate::clip::normalized_clip_name);
+        self.replace_midi_clip(track, index, clip)
     }
 
     pub fn reverse_audio_clip(
@@ -690,7 +735,7 @@ impl Project {
         track: AudioTrackId,
         index: usize,
     ) -> Result<(), ProjectError> {
-        let mut clip = *self.audio_clip(track, index)?;
+        let mut clip = self.audio_clip(track, index)?.clone();
         self.validate_audio_clip(&clip)?;
         let mut audio = self.audio_asset(clip.asset)?.clone();
         let start = clip.source_start as usize;
@@ -960,9 +1005,9 @@ impl Project {
     ) -> Result<(), ProjectError> {
         let id = track.into();
         let track = self.track(id)?;
-        if lane.target().value(track).is_none() {
+        let Some(current) = lane.target().value(track) else {
             return Err(ProjectError::InvalidAutomationTarget);
-        }
+        };
         if let Some(point) = lane.points().last() {
             self.tempo.ticks_to_frames(point.tick)?;
         }
@@ -973,6 +1018,14 @@ impl Project {
         if existing.is_none() && track.automation().len() >= MAX_AUTOMATION_LANES {
             return Err(ProjectError::TooManyAutomationLanes);
         }
+        // A lane without an anchor keeps the one it replaces, so redrawing
+        // points doesn't undo a trim; a new lane starts untrimmed.
+        let anchor = lane.anchor().unwrap_or_else(|| {
+            existing
+                .and_then(|index| track.automation()[index].anchor())
+                .unwrap_or(current)
+        });
+        let lane = lane.with_anchor(Some(anchor));
         let lanes = self.tracks[id.index()].automation_mut();
         if let Some(index) = existing {
             lanes[index] = lane;
@@ -980,6 +1033,20 @@ impl Project {
             lanes.push(lane);
         }
         Ok(())
+    }
+
+    /// Anchors every lane at its control's current value, leaving it untrimmed.
+    pub(crate) fn reanchor_automation(&mut self) {
+        for track in &mut self.tracks {
+            let anchors: Vec<_> = track
+                .automation()
+                .iter()
+                .map(|lane| lane.target().value(track))
+                .collect();
+            for (lane, anchor) in track.automation_mut().iter_mut().zip(anchors) {
+                *lane = lane.clone().with_anchor(anchor);
+            }
+        }
     }
 
     pub fn remove_track_automation(
@@ -1814,6 +1881,28 @@ impl Project {
     pub(crate) fn assets(&self) -> &[Arc<AudioBuffer>] {
         &self.assets
     }
+
+    /// Drops audio no clip refers to any more, renumbering the clips' assets.
+    pub(crate) fn retain_used_assets(&mut self) {
+        let mut remap = vec![None; self.assets.len()];
+        let mut kept = Vec::new();
+        for track in &mut self.tracks {
+            let Track::Audio(track) = track else {
+                continue;
+            };
+            for index in 0..track.clips().len() {
+                let mut clip = track.clips()[index].clone();
+                let old = clip.asset.0;
+                let new = *remap[old].get_or_insert_with(|| {
+                    kept.push(Arc::clone(&self.assets[old]));
+                    kept.len() - 1
+                });
+                clip.asset = AssetId(new);
+                track.replace_clip(index, clip);
+            }
+        }
+        self.assets = kept;
+    }
 }
 
 fn track_id(index: usize, track: &Track) -> TrackId {
@@ -1927,6 +2016,7 @@ pub enum ProjectError {
     EmptyMidiNote {
         note: usize,
     },
+    InvalidPitchBend,
     MidiNoteRangeOverflow {
         note: usize,
     },
@@ -2058,6 +2148,9 @@ impl fmt::Display for ProjectError {
             }
             Self::InvalidMidiChannel { note, channel } => {
                 write!(f, "MIDI note {note} has channel {channel}; expected 0..=15")
+            }
+            Self::InvalidPitchBend => {
+                write!(f, "pitch-bend points must be in increasing tick order")
             }
             Self::EmptyMidiNote { note } => {
                 write!(f, "MIDI note {note} must have a positive duration")

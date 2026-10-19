@@ -64,7 +64,10 @@ fn project_with_instrument(instance: PluginInstance) -> (Project, u64) {
                     key: 60,
                     velocity: 100,
                     channel: 0,
+                    slide_ticks: 0,
                 }],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -205,6 +208,7 @@ fn default_off_matrix_preserves_the_sound_of_legacy_modulation() {
         key: 64,
         velocity: 110,
         channel: 0,
+        slide_frames: 0,
     };
     a.event(on);
     b.event(on);
@@ -212,6 +216,7 @@ fn default_off_matrix_preserves_the_sound_of_legacy_modulation() {
         frame: 0,
         bpm: 120.0,
         playing: true,
+        quality: sympoie::plugin::RenderQuality::Realtime,
     };
     let mut original = vec![[0.0; 2]; 4096];
     let mut migrated = original.clone();

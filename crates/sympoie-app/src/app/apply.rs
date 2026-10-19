@@ -13,7 +13,7 @@ use crate::document::edit;
 use crate::plugins::PluginEditor;
 use crate::state::{GridMode, Selection, TimeRange};
 use crate::ui::format;
-use crate::views::{arrangement, devices};
+use crate::views::{arrangement, builtin_devices, devices};
 
 impl SympoieApp {
     pub(super) fn apply(&mut self, ctx: &egui::Context, action: Action) {
@@ -40,7 +40,9 @@ impl SympoieApp {
                     | Action::OpenProjectFolder
                     | Action::OpenPath(_)
                     | Action::Quit
-                    | Action::ExportAudio { .. }
+                    | Action::ExportAll
+                    | Action::ExportClipAudio(_)
+                    | Action::ExportClipMidi(_)
                     | Action::BounceTrack { .. }
             ) {
                 self.finish_recording();
@@ -471,6 +473,14 @@ impl SympoieApp {
                     self.piano_roll.close();
                 }
             }
+            Action::RenameClip { clip, name } => {
+                if edit::clip_name(self.document.project(), clip).unwrap_or_default() != name.trim()
+                {
+                    self.edit("Rename Clip", |project| {
+                        edit::rename_clip(project, clip, &name)
+                    });
+                }
+            }
             Action::SetClipGain { clip, gain } => {
                 let key = format!("clip-gain-{}-{}", clip.track, clip.index);
                 self.edit_coalesced(&key, "Clip Gain", |project| {
@@ -613,6 +623,32 @@ impl SympoieApp {
                     self.piano_roll.invalidate();
                 }
             }
+            Action::EditMidiPitchBend {
+                clip,
+                before,
+                points,
+                label,
+            } => {
+                if self.piano_roll.clip == Some(clip)
+                    && edit::midi_clip(self.document.project(), clip).is_some_and(|current| {
+                        current.pitch_bend == before && current.pitch_bend != points
+                    })
+                {
+                    let committed = self
+                        .edit(label, |project| {
+                            let track = edit::midi_id(project, clip.track)?;
+                            project
+                                .set_midi_clip_pitch_bend(track, clip.index, points)
+                                .map_err(|e| e.to_string())
+                        })
+                        .is_some();
+                    if !committed {
+                        self.piano_roll.invalidate();
+                    }
+                } else {
+                    self.piano_roll.invalidate();
+                }
+            }
             Action::ImportAudio {
                 paths,
                 track,
@@ -728,7 +764,10 @@ impl SympoieApp {
             Action::SaveAs => {
                 self.save(true);
             }
-            Action::ExportAudio { loop_only } => self.export_audio(loop_only),
+            Action::ShowExport => self.open_export_window(),
+            Action::ExportAll => self.export_all(),
+            Action::ExportClipMidi(clip) => self.choose_clip_midi_export(clip),
+            Action::ExportClipAudio(clip) => self.choose_clip_audio_export(clip),
             Action::Undo | Action::Redo => {
                 arrangement::cancel_interactions(ctx);
                 let track_count = self.document.project().tracks().len();
@@ -837,6 +876,21 @@ impl SympoieApp {
                     Ok(())
                 });
             }
+            Action::LoadBuiltinPreset { id, preset } => {
+                self.edit("Load Device Preset", |project| {
+                    let plugin = project.plugin(id).ok_or("Device no longer exists")?;
+                    let kind = sympoie::builtin::BuiltinKind::from_descriptor(&plugin.descriptor)
+                        .ok_or("Device is not built in")?;
+                    let values = sympoie::builtin::preset_parameters(kind, preset)
+                        .ok_or("Unknown preset")?;
+                    for (parameter, value) in values {
+                        project
+                            .set_plugin_parameter(id, parameter, value)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    Ok(())
+                });
+            }
             Action::SetVst3Bypassed { id, bypassed } => {
                 self.edit("Plugin Bypass", |project| {
                     project
@@ -916,7 +970,11 @@ impl SympoieApp {
                 });
             }
             Action::OpenVst3Editor(id) => {
-                if self.focus_builtin_controls(ctx, id) {
+                let panel = self.document.project().plugin(id).is_some_and(|plugin| {
+                    sympoie::builtin::BuiltinKind::from_descriptor(&plugin.descriptor)
+                        .is_some_and(builtin_devices::has_panel)
+                });
+                if !panel && self.focus_builtin_controls(ctx, id) {
                     return;
                 }
                 if let Some(track) = self.plugin_track(id) {
@@ -930,6 +988,21 @@ impl SympoieApp {
             }
             Action::CloseVst3Editor(id) => {
                 self.vst3_editors.remove(&id);
+            }
+            Action::OpenBuiltinScope(id) => {
+                if self.document.project().plugin(id).is_some_and(|plugin| {
+                    sympoie::builtin::BuiltinKind::from_descriptor(&plugin.descriptor)
+                        .is_some_and(builtin_devices::has_scope)
+                }) {
+                    self.scope_windows.insert(id);
+                    ctx.send_viewport_cmd_to(
+                        devices::builtin_scope_viewport_id(id),
+                        ViewportCommand::Focus,
+                    );
+                }
+            }
+            Action::CloseBuiltinScope(id) => {
+                self.scope_windows.remove(&id);
             }
             Action::OpenNativeVst3Editor(id) => {
                 if self.document.project().plugin(id).is_some_and(|plugin| {

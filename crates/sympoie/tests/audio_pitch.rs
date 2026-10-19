@@ -28,8 +28,9 @@ fn fixture(pitch_semitones: f32) -> (Project, AudioTrackId, AudioClip) {
         pitch_semitones,
         pitch_algorithm: Default::default(),
         preserve_formants: false,
+        name: None,
     };
-    project.add_audio_clip(track, clip).unwrap();
+    project.add_audio_clip(track, clip.clone()).unwrap();
     (project, track, clip)
 }
 
@@ -56,12 +57,15 @@ fn pitch_validation_is_atomic_and_keeps_the_source_and_window() {
                 track,
                 AudioClip {
                     pitch_semitones: semitones,
-                    ..original
+                    ..original.clone()
                 }
             ),
             Err(ProjectError::InvalidClipPitch)
         ));
-        assert_eq!(project.audio_track(track).unwrap().clips(), &[original]);
+        assert_eq!(
+            project.audio_track(track).unwrap().clips(),
+            std::slice::from_ref(&original)
+        );
     }
     for semitones in [-24.0, 0.25, 24.0] {
         project.set_audio_clip_pitch(track, 0, semitones).unwrap();
@@ -69,7 +73,7 @@ fn pitch_validation_is_atomic_and_keeps_the_source_and_window() {
             project.audio_track(track).unwrap().clips(),
             &[AudioClip {
                 pitch_semitones: semitones,
-                ..original
+                ..original.clone()
             }]
         );
         assert_eq!(project.audio_duration_frames(), original.frame_count);
@@ -95,7 +99,7 @@ fn pitched_split_and_trim_are_exact_windows_of_the_processed_source() {
                     source_start: start,
                     start_tick: start,
                     frame_count: frames,
-                    ..clip
+                    ..clip.clone()
                 },
             )
             .unwrap();
@@ -182,7 +186,7 @@ fn background_preparation_pins_every_distinct_pitch_and_skips_zero_pitch() {
                 track,
                 AudioClip {
                     pitch_semitones,
-                    ..clip
+                    ..clip.clone()
                 },
             )
             .unwrap();

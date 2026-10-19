@@ -16,6 +16,7 @@ fn clip(asset: AssetId, start_tick: u64, gain: f32) -> AudioClip {
         pitch_semitones: 0.0,
         pitch_algorithm: Default::default(),
         preserve_formants: false,
+        name: None,
     }
 }
 
@@ -159,7 +160,10 @@ fn removing_midi_clips_removes_their_instrument_audio_from_a_new_renderer() {
             key: 60,
             velocity: 90,
             channel: 0,
+            slide_ticks: 0,
         }],
+        name: None,
+        pitch_bend: Vec::new(),
     };
     project.add_midi_clip(keys, clip.clone()).unwrap();
     assert!(

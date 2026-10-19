@@ -2,6 +2,7 @@ mod agent_mode;
 mod apply;
 mod bounce;
 mod dialogs;
+pub(crate) mod export_window;
 mod files;
 mod input;
 mod menus;
@@ -97,6 +98,8 @@ pub struct SympoieApp {
     browser: BrowserState,
     plugin_load: Option<PluginLoad>,
     vst3_editors: BTreeSet<u64>,
+    analog_renders: crate::audio::analog_render::AnalogRenders,
+    scope_windows: BTreeSet<u64>,
     sidechain_editors: BTreeSet<u64>,
     native_editors: BTreeMap<u64, PluginEditor>,
     plugin_window_owner: Option<vst3_host::PluginWindowOwner>,
@@ -135,6 +138,7 @@ pub struct SympoieApp {
     show_shortcuts: bool,
     show_about: bool,
     export: Option<ExportJob>,
+    export_window: export_window::ExportWindow,
     bounce: Option<TrackBounce>,
     waveforms: WaveformCache,
     window_title: String,
@@ -173,6 +177,8 @@ impl SympoieApp {
             browser: BrowserState::default(),
             plugin_load: None,
             vst3_editors: BTreeSet::new(),
+            analog_renders: Default::default(),
+            scope_windows: BTreeSet::new(),
             sidechain_editors: BTreeSet::new(),
             native_editors: BTreeMap::new(),
             plugin_window_owner: None,
@@ -213,6 +219,7 @@ impl SympoieApp {
             show_shortcuts: false,
             show_about: false,
             export: None,
+            export_window: export_window::ExportWindow::default(),
             bounce: None,
             waveforms: WaveformCache::default(),
             window_title: String::new(),
@@ -230,6 +237,8 @@ impl SympoieApp {
             app.document.break_coalescing();
         }
         app.refresh_recording_inputs();
+        let waker = ctx.clone();
+        vst3_host::set_editor_key_waker(move || waker.request_repaint());
         app
     }
 
@@ -423,6 +432,17 @@ impl SympoieApp {
                 &mut editor_actions,
             );
         }
+        // Scopes are monitors, so they stay up while another track is selected.
+        for &id in &self.scope_windows {
+            devices::show_builtin_scope(
+                &ctx,
+                self.document.project(),
+                &self.plugins,
+                id,
+                &mut editor_actions,
+            );
+        }
+        self.keep_tool_windows_above_main(&visible_plugins);
         for &id in self.sidechain_editors.intersection(&visible_plugins) {
             devices::show_sidechain_editor(
                 &ctx,
@@ -440,6 +460,7 @@ impl SympoieApp {
         );
         self.dialogs(&ctx);
         self.settings_window(&ctx);
+        self.export_window(&ctx);
         self.agent_conflict_window(&ctx);
         self.handle_close_request(&ctx);
         let had_actions = !editor_actions.is_empty() || !actions.is_empty();
@@ -494,11 +515,24 @@ impl SympoieApp {
         self.engine.release_audition_notes();
     }
 
+    /// While the window is minimized, hidden or covered, eframe runs no ui pass, so
+    /// `frame` never runs; it only calls `App::logic`. Agent tool calls must still be
+    /// answered then.
+    pub fn poll_while_hidden(&mut self, ctx: &egui::Context) {
+        if ctx.input(|input| input.viewport().visible().unwrap_or(true)) {
+            return;
+        }
+        self.status = self.engine.status();
+        self.poll_agent(ctx);
+        self.sync_engine();
+    }
+
     fn poll(&mut self, ctx: &egui::Context) {
         self.poll_recording_inputs(ctx);
         let structural_generation = self.structural_generation;
         self.poll_plugins(ctx);
         self.poll_bounce();
+        self.poll_analog_renders(ctx);
         if self.structural_generation != structural_generation {
             arrangement::cancel_interactions(ctx);
         }
@@ -546,17 +580,28 @@ impl SympoieApp {
         {
             self.export = None;
             match result {
-                Ok(summary) => {
-                    let seconds = summary.frames as f64 / f64::from(SAMPLE_RATE);
-                    let name = file_name(&summary.path);
-                    if summary.clipped_samples > 0 {
+                Ok(summaries) => {
+                    let clipped: u64 = summaries
+                        .iter()
+                        .map(|summary| summary.clipped_samples)
+                        .sum();
+                    let message = match summaries.as_slice() {
+                        [summary] => {
+                            let seconds = summary.frames as f64 / f64::from(SAMPLE_RATE);
+                            format!(
+                                "Exported {} to {}",
+                                format::duration(seconds),
+                                file_name(&summary.path)
+                            )
+                        }
+                        summaries => format!("Exported {} files", summaries.len()),
+                    };
+                    if clipped > 0 {
                         self.warn(format!(
-                            "Exported {} to {name}; {} samples clipped at full scale",
-                            format::duration(seconds),
-                            summary.clipped_samples
+                            "{message}; {clipped} samples clipped at full scale"
                         ));
                     } else {
-                        self.info(format!("Exported {} to {name}", format::duration(seconds)));
+                        self.info(message);
                     }
                 }
                 Err(error) => self.error(format!("Export failed: {error}")),
@@ -604,12 +649,23 @@ impl SympoieApp {
             });
             self.vst3_editors
                 .retain(|id| self.document.project().plugin(*id).is_some());
+            self.scope_windows
+                .retain(|id| self.document.project().plugin(*id).is_some());
             self.sidechain_editors
                 .retain(|id| self.document.project().plugin(*id).is_some());
             self.native_editors
                 .retain(|id, _| self.document.project().plugin(*id).is_some());
             if let Err(error) = self.plugins.prepare_project(self.document.project()) {
                 self.error(format!("Could not prepare plugins: {error}"));
+            }
+            // Retire stale renders before the engine sees the edit, so it never plays a
+            // render of the old notes against the new ones.
+            if self
+                .analog_renders
+                .sync(self.document.project(), &self.plugins)
+            {
+                self.engine
+                    .set_instrument_renders(self.analog_renders.renders());
             }
             if self.synced_structural_generation != self.structural_generation {
                 self.engine
@@ -622,13 +678,32 @@ impl SympoieApp {
         }
     }
 
+    fn poll_analog_renders(&mut self, ctx: &egui::Context) {
+        let poll = self.analog_renders.poll(&self.plugins);
+        if poll.changed {
+            self.engine
+                .set_instrument_renders(self.analog_renders.renders());
+        }
+        if let Some(error) = poll.failure {
+            self.warn(format!(
+                "Ferro render failed; playing live instead: {error}"
+            ));
+        }
+        if self.analog_renders.busy() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+    }
+
     fn replace_document(&mut self, document: Document) {
         self.finish_recording();
         self.stop_agent_mode();
         self.armed_tracks.clear();
         self.bounce = None;
+        self.analog_renders.clear();
+        self.engine.set_instrument_renders(Vec::new());
         self.structural_generation = self.structural_generation.wrapping_add(1);
         self.vst3_editors.clear();
+        self.scope_windows.clear();
         self.sidechain_editors.clear();
         self.native_editors.clear();
         self.plugin_load = None;
@@ -779,6 +854,10 @@ impl SympoieApp {
         &self.vst3_editors
     }
 
+    pub fn scope_windows_for_tests(&self) -> &BTreeSet<u64> {
+        &self.scope_windows
+    }
+
     pub fn sidechain_editors_for_tests(&self) -> &BTreeSet<u64> {
         &self.sidechain_editors
     }
@@ -841,10 +920,208 @@ impl SympoieApp {
             pending.job.cancel();
         }
     }
+
+    pub fn exporting_for_tests(&self) -> bool {
+        self.export.is_some()
+    }
+
+    pub fn export_window_for_tests(&mut self) -> &mut export_window::ExportWindow {
+        &mut self.export_window
+    }
+
+    pub fn settings_for_tests(&self) -> &Settings {
+        &self.settings
+    }
+
+    pub fn export_clip_midi_for_tests(
+        &mut self,
+        clip: crate::document::edit::ClipRef,
+        path: &Path,
+    ) {
+        self.export_clip_midi(clip, path);
+    }
+
+    pub fn export_clip_audio_for_tests(
+        &mut self,
+        clip: crate::document::edit::ClipRef,
+        path: PathBuf,
+    ) {
+        self.export_clip_audio(clip, path);
+    }
 }
 
 impl eframe::App for SympoieApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_while_hidden(ctx);
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        // TEMP-RAIN-SHOT: temporary screenshot hook for visual review; remove before commit.
+        if let Some(dir) = std::env::var_os("SYMPOIE_SHOT_DIR") {
+            let dir = std::path::PathBuf::from(dir);
+            let trigger = dir.join("take");
+            let pinned = egui::Id::new("rain-shot-pinned");
+            if !ui
+                .ctx()
+                .data_mut(|data| data.get_temp::<bool>(pinned).unwrap_or(false))
+            {
+                ui.ctx().data_mut(|data| data.insert_temp(pinned, true));
+                ui.ctx().send_viewport_cmd(ViewportCommand::WindowLevel(
+                    egui::WindowLevel::AlwaysOnTop,
+                ));
+            }
+            if trigger.exists() {
+                let _ = std::fs::remove_file(&trigger);
+                ui.ctx()
+                    .send_viewport_cmd(ViewportCommand::Screenshot(egui::UserData::default()));
+            }
+            ui.ctx().input(|input| {
+                for event in &input.events {
+                    if let egui::Event::Screenshot { image, .. } = event {
+                        let stamp = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0);
+                        let [w, h] = image.size;
+                        let path = dir.join(format!("shot-{stamp}-{w}x{h}.rgba"));
+                        let _ = std::fs::write(path, image.as_raw());
+                    }
+                }
+            });
+            let command = dir.join("cmd");
+            if let Ok(text) = std::fs::read_to_string(&command) {
+                let _ = std::fs::remove_file(&command);
+                let ctx = ui.ctx().clone();
+                let (rain_track, plugin_id) = self
+                    .document
+                    .project()
+                    .tracks()
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, track)| match track {
+                        Track::Midi(midi) => midi.plugin_instrument().map(|p| (index, p.id)),
+                        _ => None,
+                    })
+                    .unwrap_or((0, 0));
+                let editor = devices::vst3_editor_viewport_id(plugin_id);
+                for line in text.lines() {
+                    let words: Vec<&str> = line.split_whitespace().collect();
+                    match words.as_slice() {
+                        ["select"] => self.apply(
+                            &ctx,
+                            crate::actions::Action::SelectTracks(std::collections::BTreeSet::from(
+                                [rain_track],
+                            )),
+                        ),
+                        ["play"] => self.apply(&ctx, crate::actions::Action::TogglePlay),
+                        ["select-none"] => self.apply(
+                            &ctx,
+                            crate::actions::Action::SelectTracks(std::collections::BTreeSet::new()),
+                        ),
+                        ["editor-off"] => {
+                            self.show_rack = true;
+                            ctx.data_mut(|data| {
+                                data.insert_temp(egui::Id::new("rain-shot-editor-inline"), false)
+                            });
+                        }
+                        ["editor"] => {
+                            self.vst3_editors.insert(plugin_id);
+                        }
+                        ["editor-inline"] => {
+                            self.show_rack = false;
+                            ctx.data_mut(|data| {
+                                data.insert_temp(egui::Id::new("rain-shot-editor-inline"), true)
+                            });
+                        }
+                        ["shot-editor"] => ctx.send_viewport_cmd_to(
+                            editor,
+                            ViewportCommand::Screenshot(egui::UserData::default()),
+                        ),
+                        ["param", parameter, value] => {
+                            let parameter: u32 = parameter.parse().unwrap_or(0);
+                            let physical: f64 = value.parse().unwrap_or(0.0);
+                            let specs =
+                                sympoie::builtin::parameters(sympoie::builtin::BuiltinKind::Rain);
+                            let spec = specs.iter().find(|spec| spec.id == parameter);
+                            let id = Some(plugin_id);
+                            if let (Some(spec), Some(id)) = (spec, id) {
+                                self.apply(
+                                    &ctx,
+                                    crate::actions::Action::SetVst3Parameter {
+                                        id,
+                                        parameter,
+                                        value: spec.normalize(physical),
+                                    },
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let plugin_id = self
+                .document
+                .project()
+                .tracks()
+                .iter()
+                .find_map(|track| match track {
+                    Track::Midi(midi) => midi.plugin_instrument().map(|p| p.id),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            let editor = devices::vst3_editor_viewport_id(plugin_id);
+            ui.ctx().input_for(editor, |input| {
+                for event in &input.events {
+                    if let egui::Event::Screenshot { image, .. } = event {
+                        let stamp = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0);
+                        let [w, h] = image.size;
+                        let path = dir.join(format!("editor-{stamp}-{w}x{h}.rgba"));
+                        let _ = std::fs::write(path, image.as_raw());
+                    }
+                }
+            });
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+            let inline = ui.ctx().data_mut(|data| {
+                data.get_temp::<bool>(egui::Id::new("rain-shot-editor-inline"))
+                    .unwrap_or(false)
+            });
+            if inline {
+                let ctx = ui.ctx().clone();
+                let project = self.document.project();
+                let _ = std::fs::write(
+                    dir.join("state.txt"),
+                    format!(
+                        "plugin_id={plugin_id} found={} tracks={} selection={:?}\n",
+                        project.plugin(plugin_id).is_some(),
+                        project.tracks().len(),
+                        self.selection.tracks
+                    ),
+                );
+                if let Some(plugin) = project.plugin(plugin_id) {
+                    let telemetry = self.plugins.builtin_telemetry(plugin_id);
+                    let mut actions = Vec::new();
+                    let kind = sympoie::builtin::BuiltinKind::from_descriptor(&plugin.descriptor)
+                        .unwrap_or(sympoie::builtin::BuiltinKind::Rain);
+                    let [width, height] = crate::views::builtin_devices::editor_size(kind);
+                    egui::Window::new("Editor (inline for review)")
+                        .fixed_pos(egui::pos2(20.0, 160.0))
+                        .fixed_size(egui::vec2(width, height))
+                        .show(&ctx, |ui| {
+                            crate::views::builtin_devices::show(
+                                ui,
+                                plugin,
+                                kind,
+                                telemetry.as_deref(),
+                                &mut actions,
+                            );
+                        });
+                }
+            }
+        }
         self.frame(ui);
     }
 }

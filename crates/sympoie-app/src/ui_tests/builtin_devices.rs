@@ -8,14 +8,16 @@ fn load(harness: &mut Harness, track: usize, kind: BuiltinKind) -> u64 {
     });
     harness.steps(3);
     let target = &harness.project().tracks()[track];
-    match kind {
-        BuiltinKind::Oscil | BuiltinKind::Sampler => {
+    match kind.descriptor().kind {
+        sympoie::plugin::PluginKind::Instrument => {
             let Track::Midi(midi) = target else {
                 panic!("MIDI destination required")
             };
             midi.plugin_instrument().expect("built-in loaded").id
         }
-        _ => target.effects().last().expect("built-in effect loaded").id,
+        sympoie::plugin::PluginKind::Effect => {
+            target.effects().last().expect("built-in effect loaded").id
+        }
     }
 }
 
@@ -224,4 +226,69 @@ fn modulation_matrix_controls_support_edit_history_and_reset() {
     harness.dispatch(Action::Undo);
     assert_eq!(harness.project().plugin(id), Some(&edited));
     assert!(harness.app.vst3_editors_for_tests().is_empty());
+}
+
+#[test]
+fn varimu_scope_window_opens_only_for_the_varimu_and_follows_the_device() {
+    let mut harness = Harness::with_empty_project();
+    let eq = load(&mut harness, 0, BuiltinKind::Eq);
+    let varimu = load(&mut harness, 0, BuiltinKind::VariMu);
+    assert!(harness.app.scope_windows_for_tests().is_empty());
+    harness.dispatch(Action::OpenBuiltinScope(eq));
+    assert!(harness.app.scope_windows_for_tests().is_empty());
+    harness.dispatch(Action::OpenBuiltinScope(varimu));
+    harness.steps(2);
+    assert!(harness.app.scope_windows_for_tests().contains(&varimu));
+    harness.dispatch(Action::CloseBuiltinScope(varimu));
+    assert!(harness.app.scope_windows_for_tests().is_empty());
+    harness.dispatch(Action::OpenBuiltinScope(varimu));
+    harness.dispatch(Action::Undo);
+    harness.steps(2);
+    assert!(harness.project().plugin(varimu).is_none());
+    assert!(
+        harness.app.scope_windows_for_tests().is_empty(),
+        "removing the device closes its scope"
+    );
+}
+
+#[test]
+fn rain_presets_load_as_one_undo_step_and_track_edits_as_custom() {
+    let mut harness = Harness::with_empty_project();
+    harness.dispatch(Action::AddTrack(crate::document::edit::TrackKind::Midi));
+    let id = load(&mut harness, 1, BuiltinKind::Rain);
+    assert_eq!(
+        builtin::matching_preset(harness.project().plugin(id).unwrap()),
+        Some(0)
+    );
+    harness.dispatch(Action::LoadBuiltinPreset { id, preset: 3 });
+    assert_eq!(
+        builtin::matching_preset(harness.project().plugin(id).unwrap()),
+        Some(3),
+        "{}",
+        builtin::rain::PRESETS[3].name
+    );
+    harness.dispatch(Action::SetVst3Parameter {
+        id,
+        parameter: builtin::rain::SPACE,
+        value: 0.9,
+    });
+    assert_eq!(
+        builtin::matching_preset(harness.project().plugin(id).unwrap()),
+        None
+    );
+    harness.dispatch(Action::Undo);
+    assert_eq!(
+        builtin::matching_preset(harness.project().plugin(id).unwrap()),
+        Some(3)
+    );
+    harness.dispatch(Action::Undo);
+    assert_eq!(
+        builtin::matching_preset(harness.project().plugin(id).unwrap()),
+        Some(0)
+    );
+    harness.dispatch(Action::LoadBuiltinPreset { id, preset: 99 });
+    assert_eq!(
+        builtin::matching_preset(harness.project().plugin(id).unwrap()),
+        Some(0)
+    );
 }

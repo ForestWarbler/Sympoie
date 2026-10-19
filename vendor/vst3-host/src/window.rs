@@ -17,6 +17,123 @@ use objc2_app_kit::{
 #[cfg(target_os = "macos")]
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
+/// A key typed into a plugin editor window that the host acts on instead of the plugin,
+/// so transport control keeps working while an editor has keyboard focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorKey {
+    /// The space bar, pressed without modifiers.
+    Space,
+}
+
+/// Keys forwarded from plugin editors since the last call, oldest first.
+///
+/// Forwarding is implemented on macOS; other platforms return nothing. Call on the GUI thread.
+pub fn take_editor_keys() -> Vec<EditorKey> {
+    #[cfg(target_os = "macos")]
+    {
+        editor_keys::PENDING.with(|pending| std::mem::take(&mut *pending.borrow_mut()))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Vec::new()
+    }
+}
+
+/// Called on the GUI thread whenever a key is forwarded, so an idle host can wake up and
+/// call [`take_editor_keys`]. Replaces any previous waker.
+pub fn set_editor_key_waker(waker: impl Fn() + 'static) {
+    #[cfg(target_os = "macos")]
+    editor_keys::WAKER.with(|slot| *slot.borrow_mut() = Some(Box::new(waker)));
+    #[cfg(not(target_os = "macos"))]
+    let _ = waker;
+}
+
+#[cfg(target_os = "macos")]
+mod editor_keys {
+    use super::EditorKey;
+    use objc2::{rc::Retained, runtime::AnyObject, ClassType};
+    use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags, NSText, NSWindow};
+    use objc2_foundation::NSObjectProtocol;
+    use std::cell::RefCell;
+    use std::ptr::NonNull;
+
+    const SPACE_KEY_CODE: u16 = 49;
+
+    thread_local! {
+        /// Editor windows by address; only their key events are forwarded.
+        static WINDOWS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+        pub(super) static PENDING: RefCell<Vec<EditorKey>> = const { RefCell::new(Vec::new()) };
+        pub(super) static WAKER: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+        static MONITOR: RefCell<Option<Retained<AnyObject>>> = const { RefCell::new(None) };
+    }
+
+    fn address(window: &NSWindow) -> usize {
+        window as *const NSWindow as usize
+    }
+
+    pub(super) fn register(window: &NSWindow) {
+        install();
+        WINDOWS.with(|windows| windows.borrow_mut().push(address(window)));
+    }
+
+    pub(super) fn unregister(window: &NSWindow) {
+        let address = address(window);
+        WINDOWS.with(|windows| windows.borrow_mut().retain(|&known| known != address));
+    }
+
+    /// Whether the event should go to the host. Text typed into a native text field stays
+    /// with the plugin.
+    fn forwarded(event: &NSEvent) -> Option<EditorKey> {
+        let window = event.window(objc2::MainThreadMarker::new()?)?;
+        if !WINDOWS.with(|windows| windows.borrow().contains(&address(&window))) {
+            return None;
+        }
+        let modifiers = event.modifierFlags()
+            & (NSEventModifierFlags::Command
+                | NSEventModifierFlags::Control
+                | NSEventModifierFlags::Option
+                | NSEventModifierFlags::Shift);
+        if event.keyCode() != SPACE_KEY_CODE || !modifiers.is_empty() {
+            return None;
+        }
+        let editing_text = window
+            .firstResponder()
+            .is_some_and(|responder| responder.isKindOfClass(NSText::class()));
+        (!editing_text).then_some(EditorKey::Space)
+    }
+
+    fn install() {
+        if MONITOR.with(|monitor| monitor.borrow().is_some()) {
+            return;
+        }
+        let block = block2::RcBlock::new(|event: NonNull<NSEvent>| -> *mut NSEvent {
+            // SAFETY: AppKit hands the monitor a live event for the duration of the call.
+            let reference = unsafe { event.as_ref() };
+            match forwarded(reference) {
+                Some(key) => {
+                    // Auto-repeat is swallowed so holding the bar toggles playback once.
+                    if !reference.isARepeat() {
+                        PENDING.with(|pending| pending.borrow_mut().push(key));
+                        WAKER.with(|waker| {
+                            if let Some(waker) = waker.borrow().as_ref() {
+                                waker();
+                            }
+                        });
+                    }
+                    std::ptr::null_mut()
+                }
+                None => event.as_ptr(),
+            }
+        });
+        // SAFETY: called on the main thread; the handler returns either the original event
+        // or null, as the API requires. The monitor lives for the rest of the process.
+        let monitor = unsafe {
+            NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &block)
+        };
+        MONITOR.with(|slot| *slot.borrow_mut() = monitor);
+    }
+}
+
 #[cfg(target_os = "windows")]
 use winapi::{
     shared::minwindef::{LPARAM, LRESULT, UINT, WPARAM},
@@ -187,6 +304,46 @@ impl PluginWindowOwner {
         Err(Error::Other(
             "unsupported plugin window owner handle".into(),
         ))
+    }
+
+    /// Attach the application's other visible windows titled exactly `title` above this
+    /// owner, the way plugin editors are attached: they stay in front of the host window when
+    /// it is clicked, without floating over other applications. Windows that already have a
+    /// parent are left alone, so calling this every frame is cheap. Returns how many windows
+    /// were newly attached.
+    ///
+    /// Implemented on macOS; other platforms attach nothing. Call on the GUI thread.
+    pub fn adopt_windows_titled(&self, title: &str) -> usize {
+        #[cfg(target_os = "macos")]
+        {
+            let Some(mtm) = MainThreadMarker::new() else {
+                return 0;
+            };
+            let mut adopted = 0;
+            for window in NSApplication::sharedApplication(mtm).windows().iter() {
+                if Retained::as_ptr(&window) == Retained::as_ptr(&self.window)
+                    || window.parentWindow().is_some()
+                    || !window.isVisible()
+                    || window.isMiniaturized()
+                    || window.title().to_string() != title
+                {
+                    continue;
+                }
+                // SAFETY: both windows are live on the main thread and the candidate has no
+                // parent, so attaching it cannot create an ownership cycle.
+                unsafe {
+                    self.window
+                        .addChildWindow_ordered(&window, NSWindowOrderingMode::Above)
+                };
+                adopted += 1;
+            }
+            adopted
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = title;
+            0
+        }
     }
 }
 
@@ -389,6 +546,7 @@ impl PluginWindow {
                 unsafe { owner.addChildWindow_ordered(&window, NSWindowOrderingMode::Above) };
             }
             window.makeKeyAndOrderFront(None);
+            editor_keys::register(&window);
 
             self.native_window = Some(window);
             self.container_view = Some(container_view);
@@ -940,6 +1098,7 @@ impl PluginWindow {
             self.hidden_parent = None;
             self.container_view = None;
             if let Some(window) = self.native_window.take() {
+                editor_keys::unregister(&window);
                 if let Some(owner) = window.parentWindow() {
                     owner.removeChildWindow(&window);
                 }

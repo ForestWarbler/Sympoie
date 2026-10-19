@@ -1,8 +1,11 @@
 pub mod effects;
+pub mod ferro;
 pub mod instruments;
+pub mod rain;
+pub mod varimu;
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::plugin::{
     MAX_PLUGIN_PARAMETERS, PluginDescriptor, PluginError, PluginInstance, PluginKind,
@@ -15,10 +18,21 @@ pub enum BuiltinKind {
     Sampler,
     Eq,
     Comp,
+    VariMu,
+    Rain,
+    Ferro,
 }
 
 impl BuiltinKind {
-    pub const ALL: [Self; 4] = [Self::Oscil, Self::Sampler, Self::Eq, Self::Comp];
+    pub const ALL: [Self; 7] = [
+        Self::Oscil,
+        Self::Sampler,
+        Self::Eq,
+        Self::Comp,
+        Self::VariMu,
+        Self::Rain,
+        Self::Ferro,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -26,6 +40,9 @@ impl BuiltinKind {
             Self::Sampler => "Sampler",
             Self::Eq => "EQ",
             Self::Comp => "Comp",
+            Self::VariMu => "Vari-Mu",
+            Self::Rain => "Rain",
+            Self::Ferro => "Ferro",
         }
     }
 
@@ -37,7 +54,7 @@ impl BuiltinKind {
             name: self.name().to_owned(),
             vendor: "Sympoie".to_owned(),
             kind: match self {
-                Self::Oscil | Self::Sampler => PluginKind::Instrument,
+                Self::Oscil | Self::Sampler | Self::Rain | Self::Ferro => PluginKind::Instrument,
                 _ => PluginKind::Effect,
             },
         }
@@ -166,6 +183,19 @@ pub fn choices(kind: BuiltinKind, id: u32) -> Option<&'static [&'static str]> {
         BuiltinKind::Sampler => (spec.name == "Playback").then_some(&PLAYBACK_MODES[..]),
         BuiltinKind::Eq => (spec.name.ends_with(" Type")).then_some(&EQ_BAND_TYPES[..]),
         BuiltinKind::Comp => (spec.name == "Detector").then_some(&DETECTORS[..]),
+        BuiltinKind::VariMu => match id {
+            varimu::RATIO => Some(&varimu::RATIOS[..]),
+            varimu::TIME_CONSTANT => Some(&varimu::TIME_CONSTANTS[..]),
+            varimu::STEREO => Some(&varimu::STEREO_MODES[..]),
+            _ => None,
+        },
+        BuiltinKind::Rain => match id {
+            rain::ORDER => Some(&rain::ORDERS[..]),
+            rain::DIVISION => Some(&rain::DIVISIONS[..]),
+            rain::SHAPE => Some(&OSC_SHAPES[..]),
+            _ => None,
+        },
+        BuiltinKind::Ferro => ferro::choices(id),
     };
     named.or_else(|| (spec.steps == 1 && spec.min == 0.0 && spec.max == 1.0).then_some(&SWITCH[..]))
 }
@@ -176,6 +206,9 @@ pub fn parameters(kind: BuiltinKind) -> Vec<ParameterSpec> {
         BuiltinKind::Sampler => instruments::sampler_parameters(),
         BuiltinKind::Eq => effects::eq_parameters(),
         BuiltinKind::Comp => effects::comp_parameters(),
+        BuiltinKind::VariMu => varimu::parameters(),
+        BuiltinKind::Rain => rain::parameters(),
+        BuiltinKind::Ferro => ferro::parameters(),
     }
 }
 
@@ -210,6 +243,33 @@ pub fn complete_parameters(instance: &mut PluginInstance) -> Result<bool, Plugin
     Ok(changed)
 }
 
+/// Names of the device's factory presets, empty for devices without any.
+pub fn preset_names(kind: BuiltinKind) -> Vec<&'static str> {
+    match kind {
+        BuiltinKind::Rain => rain::PRESETS.iter().map(|preset| preset.name).collect(),
+        BuiltinKind::Ferro => ferro::PRESETS.iter().map(|preset| preset.name).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Every parameter of a factory preset as `(id, normalized value)`.
+pub fn preset_parameters(kind: BuiltinKind, preset: usize) -> Option<Vec<(u32, f64)>> {
+    match kind {
+        BuiltinKind::Rain => rain::preset_parameters(preset),
+        BuiltinKind::Ferro => ferro::preset_parameters(preset),
+        _ => None,
+    }
+}
+
+/// The factory preset an instance currently matches, if any.
+pub fn matching_preset(instance: &PluginInstance) -> Option<usize> {
+    match BuiltinKind::from_descriptor(&instance.descriptor)? {
+        BuiltinKind::Rain => rain::matching_preset(instance),
+        BuiltinKind::Ferro => ferro::matching_preset(instance),
+        _ => None,
+    }
+}
+
 pub fn value(instance: &PluginInstance, id: u32) -> f64 {
     let Some(kind) = BuiltinKind::from_descriptor(&instance.descriptor) else {
         return 0.0;
@@ -226,20 +286,164 @@ pub fn value(instance: &PluginInstance, id: u32) -> f64 {
 
 #[derive(Debug)]
 pub struct Telemetry {
+    /// Spectrum of the device's output (dB per log-spaced band, 20 Hz–20 kHz).
     pub spectrum: [AtomicU32; 128],
+    /// Spectrum of the device's input, for devices that compare before and after.
+    pub input_spectrum: [AtomicU32; 128],
+    /// Counts spectrum refreshes. Spectra survive a device reset (the engine resets devices
+    /// at every loop wrap), so a display that sees this stop advancing should let them fade.
+    pub spectrum_updates: AtomicU32,
     pub input_db: AtomicU32,
     pub output_db: AtomicU32,
     pub reduction_db: AtomicU32,
+    pub scope: Scope,
+    /// Drops the rain drum has landed, for its pond display.
+    pub rain_drops: rain::DropLog,
+    /// Keys the rain drum is holding, one bit per MIDI key.
+    pub rain_held: [AtomicU64; 2],
+    /// Loudness contour level of each Ferro voice (f32 bits), 0 when the voice is free.
+    pub ferro_voices: [AtomicU32; ferro::MAX_VOICES],
+    /// The host's offline render of this instrument, for devices that can play one:
+    /// a [`RenderState`] and the progress of a render in flight (f32 bits, 0..1).
+    pub render_state: AtomicU32,
+    pub render_progress: AtomicU32,
+}
+
+/// What the host is doing with an instrument's cached offline render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum RenderState {
+    /// Playing the realtime engine; no render is wanted.
+    Live = 0,
+    /// A render is queued or running; the realtime engine plays meanwhile.
+    Rendering = 1,
+    /// Playback comes from the finished render.
+    Ready = 2,
+    /// The last render failed; the realtime engine plays.
+    Failed = 3,
+}
+
+impl Telemetry {
+    pub fn render_state(&self) -> RenderState {
+        match self.render_state.load(Ordering::Relaxed) {
+            1 => RenderState::Rendering,
+            2 => RenderState::Ready,
+            3 => RenderState::Failed,
+            _ => RenderState::Live,
+        }
+    }
+
+    pub fn set_render_state(&self, state: RenderState, progress: f32) {
+        self.render_progress
+            .store(progress.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        self.render_state.store(state as u32, Ordering::Relaxed);
+    }
+
+    pub fn render_progress(&self) -> f32 {
+        f32::from_bits(self.render_progress.load(Ordering::Relaxed))
+    }
 }
 
 impl Default for Telemetry {
     fn default() -> Self {
         Self {
             spectrum: std::array::from_fn(|_| AtomicU32::new((-120.0_f32).to_bits())),
+            input_spectrum: std::array::from_fn(|_| AtomicU32::new((-120.0_f32).to_bits())),
+            spectrum_updates: AtomicU32::new(0),
             input_db: AtomicU32::new((-120.0_f32).to_bits()),
             output_db: AtomicU32::new((-120.0_f32).to_bits()),
             reduction_db: AtomicU32::new(0.0_f32.to_bits()),
+            scope: Scope::default(),
+            rain_drops: rain::DropLog::default(),
+            rain_held: [AtomicU64::new(0), AtomicU64::new(0)],
+            ferro_voices: std::array::from_fn(|_| AtomicU32::new(0)),
+            render_state: AtomicU32::new(0),
+            render_progress: AtomicU32::new(0),
         }
+    }
+}
+
+pub const SCOPE_COLUMNS: usize = 1024;
+/// Frames summarised by one scope column; 1024 columns hold about two seconds.
+pub const SCOPE_FRAMES_PER_COLUMN: usize = 96;
+
+/// One summarised slice of before/after audio.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ScopeColumn {
+    pub input_min: f32,
+    pub input_max: f32,
+    pub input_power: f32,
+    pub output_min: f32,
+    pub output_max: f32,
+    pub output_power: f32,
+    pub reduction_db: f32,
+}
+
+/// Lock-free history of before/after waveform columns, written by the audio thread and
+/// read by the interface. A reader racing the writer may see one half-updated column,
+/// which only affects a single pixel column of the display.
+#[derive(Debug)]
+pub struct Scope {
+    columns: Box<[[AtomicU32; 7]]>,
+    written: AtomicU32,
+}
+
+impl Default for Scope {
+    fn default() -> Self {
+        Self {
+            columns: (0..SCOPE_COLUMNS)
+                .map(|_| std::array::from_fn(|_| AtomicU32::new(0)))
+                .collect(),
+            written: AtomicU32::new(0),
+        }
+    }
+}
+
+impl Scope {
+    pub fn push(&self, column: ScopeColumn) {
+        let written = self.written.load(Ordering::Relaxed);
+        let slot = &self.columns[written as usize % SCOPE_COLUMNS];
+        let values = [
+            column.input_min,
+            column.input_max,
+            column.input_power,
+            column.output_min,
+            column.output_max,
+            column.output_power,
+            column.reduction_db,
+        ];
+        for (cell, value) in slot.iter().zip(values) {
+            cell.store(value.to_bits(), Ordering::Relaxed);
+        }
+        self.written
+            .store(written.wrapping_add(1), Ordering::Release);
+    }
+
+    /// Columns written so far; wraps after about three months of audio.
+    pub fn written(&self) -> u32 {
+        self.written.load(Ordering::Acquire)
+    }
+
+    /// The most recent columns, oldest first.
+    pub fn snapshot(&self) -> Vec<ScopeColumn> {
+        let written = self.written();
+        let count = (written as usize).min(SCOPE_COLUMNS);
+        (0..count)
+            .map(|age| {
+                let index = written.wrapping_sub((count - age) as u32) as usize % SCOPE_COLUMNS;
+                let read =
+                    |i: usize| f32::from_bits(self.columns[index][i].load(Ordering::Relaxed));
+                ScopeColumn {
+                    input_min: read(0),
+                    input_max: read(1),
+                    input_power: read(2),
+                    output_min: read(3),
+                    output_max: read(4),
+                    output_power: read(5),
+                    reduction_db: read(6),
+                }
+            })
+            .collect()
     }
 }
 
@@ -257,6 +461,9 @@ pub fn create_processor_with_telemetry(
         BuiltinKind::Sampler => instruments::create_sampler(instance),
         BuiltinKind::Eq => effects::create_eq(instance, telemetry),
         BuiltinKind::Comp => effects::create_comp(instance, telemetry),
+        BuiltinKind::VariMu => varimu::create_varimu(instance, telemetry),
+        BuiltinKind::Rain => rain::create_rain(instance, telemetry),
+        BuiltinKind::Ferro => ferro::create_ferro(instance, telemetry),
     }
 }
 
@@ -266,7 +473,10 @@ pub fn release_frames(
 ) -> Option<u64> {
     use crate::automation::AutomationTarget;
     let kind = BuiltinKind::from_descriptor(&instance.descriptor)?;
-    if !matches!(kind, BuiltinKind::Oscil | BuiltinKind::Sampler) {
+    if !matches!(
+        kind,
+        BuiltinKind::Oscil | BuiltinKind::Sampler | BuiltinKind::Rain | BuiltinKind::Ferro
+    ) {
         return Some(0);
     }
     let release = parameters(kind).into_iter().find(|p| p.id == 13)?;
@@ -280,15 +490,44 @@ pub fn release_frames(
                         parameter: 13,
                     }
         })
-        .flat_map(|lane| lane.points())
-        .map(|point| release.denormalize(point.value))
+        .flat_map(|lane| {
+            let stored = instance.parameters.iter().find(|p| p.id == 13);
+            lane.trimmed_values(stored.map_or(lane.anchor().unwrap_or(0.0), |p| p.value))
+        })
+        .map(|value| release.denormalize(value))
         .fold(value(instance, 13), f64::max);
+    let seconds = if kind == BuiltinKind::Rain {
+        seconds + rain::extra_tail_seconds(instance)
+    } else {
+        seconds
+    };
     Some((seconds * crate::SAMPLE_RATE as f64).ceil() as u64)
 }
 
 #[cfg(test)]
 mod choice_tests {
     use super::*;
+
+    #[test]
+    fn scope_history_wraps_and_reads_oldest_first() {
+        let scope = Scope::default();
+        assert!(scope.snapshot().is_empty());
+        for index in 0..1500 {
+            scope.push(ScopeColumn {
+                reduction_db: index as f32,
+                ..ScopeColumn::default()
+            });
+        }
+        let columns = scope.snapshot();
+        assert_eq!(columns.len(), SCOPE_COLUMNS);
+        assert_eq!(columns[0].reduction_db, (1500 - SCOPE_COLUMNS) as f32);
+        assert_eq!(columns[SCOPE_COLUMNS - 1].reduction_db, 1499.0);
+        assert!(
+            columns
+                .windows(2)
+                .all(|pair| pair[1].reduction_db == pair[0].reduction_db + 1.0)
+        );
+    }
 
     #[test]
     fn every_stepped_choice_list_matches_its_steps() {

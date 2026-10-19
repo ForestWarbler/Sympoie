@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 
 use sympoie::bounce::BouncePlan;
+use sympoie::plugin::RenderQuality;
 use sympoie::project::AudioBuffer;
 use sympoie::render::Renderer;
 use sympoie::{Frame, SAMPLE_RATE};
@@ -116,11 +117,12 @@ fn bounce(
             .ok_or_else(|| "bounce cancelled".to_owned())?;
         let mut renderer = Renderer::with_plugin_host(&plan.project, &*plugins)
             .map_err(|error| error.to_string())?;
+        renderer.set_quality(RenderQuality::Offline);
         render_audio(
             &mut renderer,
             plan.start_frame,
             plan.end_frame,
-            progress,
+            |done| progress.store(done, Ordering::Relaxed),
             cancel,
             || {
                 let errors = plugins.take_errors();
@@ -136,14 +138,28 @@ fn bounce(
     Ok(BounceResult { plan, audio })
 }
 
-fn render_audio(
+pub(crate) fn render_audio(
     renderer: &mut Renderer<'_>,
     start_frame: u64,
     end_frame: u64,
-    progress: &AtomicU64,
+    progress: impl Fn(u64),
+    cancel: &AtomicBool,
+    service: impl FnMut() -> Result<(), String>,
+) -> Result<AudioBuffer, String> {
+    let samples = render_frames(renderer, start_frame, end_frame, progress, cancel, service)?;
+    AudioBuffer::new(samples).map_err(|error| error.to_string())
+}
+
+/// Renders `start_frame..end_frame`, running the renderer from frame 0 so instrument state
+/// and latency are right at the start of the range.
+pub(crate) fn render_frames(
+    renderer: &mut Renderer<'_>,
+    start_frame: u64,
+    end_frame: u64,
+    progress: impl Fn(u64),
     cancel: &AtomicBool,
     mut service: impl FnMut() -> Result<(), String>,
-) -> Result<AudioBuffer, String> {
+) -> Result<Vec<Frame>, String> {
     cancelled(cancel)?;
     let frame_count = checked_frame_count(start_frame, end_frame)?;
     let mut samples = Vec::new();
@@ -174,11 +190,11 @@ fn render_audio(
         let skip = start_frame.saturating_sub(done).min(count as u64) as usize;
         samples.extend_from_slice(&block[skip..count]);
         done += count as u64;
-        progress.store(done, Ordering::Relaxed);
+        progress(done);
     }
     cancelled(cancel)?;
     debug_assert_eq!(samples.len(), frame_count);
-    AudioBuffer::new(samples).map_err(|error| error.to_string())
+    Ok(samples)
 }
 
 #[cfg(test)]
@@ -217,6 +233,7 @@ mod tests {
                     pitch_semitones: 0.0,
                     pitch_algorithm: Default::default(),
                     preserve_formants: false,
+                    name: None,
                 },
             )
             .unwrap();
@@ -283,6 +300,7 @@ mod tests {
             key: 69,
             velocity: 100,
             channel: 0,
+            slide_ticks: 0,
         });
         project.add_midi_clip(track, clip).unwrap();
         let note_end = project.tempo().ticks_to_frames(91 + 960).unwrap();
@@ -359,7 +377,7 @@ mod tests {
             &mut renderer,
             plan.start_frame,
             plan.end_frame,
-            &AtomicU64::new(0),
+            |_| {},
             &AtomicBool::new(false),
             || Ok(()),
         )
@@ -383,7 +401,7 @@ mod tests {
             &mut renderer,
             0,
             (BLOCK_FRAMES * 3) as u64,
-            &progress,
+            |done| progress.store(done, Ordering::Relaxed),
             &cancel,
             || panic!("pre-cancelled bounce must not service plugins"),
         );
@@ -396,7 +414,7 @@ mod tests {
             &mut renderer,
             0,
             (BLOCK_FRAMES * 3) as u64,
-            &progress,
+            |done| progress.store(done, Ordering::Relaxed),
             &cancel,
             || {
                 service_calls += 1;
@@ -414,7 +432,7 @@ mod tests {
             &mut renderer,
             0,
             (BLOCK_FRAMES * 3) as u64,
-            &progress,
+            |done| progress.store(done, Ordering::Relaxed),
             &cancel,
             || Err("plugin failed while processing".into()),
         );
@@ -455,6 +473,7 @@ mod tests {
                     pitch_semitones: 0.0,
                     pitch_algorithm: Default::default(),
                     preserve_formants: false,
+                    name: None,
                 },
             )
             .unwrap();
@@ -464,7 +483,7 @@ mod tests {
             &mut renderer,
             0,
             32,
-            &progress,
+            |done| progress.store(done, Ordering::Relaxed),
             &AtomicBool::new(false),
             || Ok(()),
         );

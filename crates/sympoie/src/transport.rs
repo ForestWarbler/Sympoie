@@ -167,6 +167,11 @@ impl<'a> Transport<'a> {
         self.renderer.has_auditions()
     }
 
+    /// See [`Renderer::set_instrument_renders`].
+    pub fn set_instrument_renders(&mut self, renders: &[(u64, std::sync::Arc<[Frame]>)]) {
+        self.renderer.set_instrument_renders(renders);
+    }
+
     pub fn process_monitor_block(&mut self, output: &mut [Frame]) {
         self.renderer
             .render_monitor_block(self.position_frame, output);

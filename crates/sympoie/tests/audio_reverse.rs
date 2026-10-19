@@ -33,18 +33,19 @@ fn reversing_a_trimmed_clip_preserves_hidden_audio_shared_clips_and_snapshots() 
         pitch_semitones: 0.0,
         pitch_algorithm: Default::default(),
         preserve_formants: false,
+        name: None,
     };
-    project.add_audio_clip(track, clip).unwrap();
+    project.add_audio_clip(track, clip.clone()).unwrap();
     let shared = AudioClip {
         start_tick: 20,
-        ..clip
+        ..clip.clone()
     };
-    project.add_audio_clip(track, shared).unwrap();
+    project.add_audio_clip(track, shared.clone()).unwrap();
     let before = project.clone();
 
     project.reverse_audio_clip(track, 0).unwrap();
 
-    let reversed = project.audio_track(track).unwrap().clips()[0];
+    let reversed = project.audio_track(track).unwrap().clips()[0].clone();
     assert_ne!(reversed.asset, asset);
     assert_eq!(AudioClip { asset, ..reversed }, clip);
     let expected = vec![
@@ -97,21 +98,22 @@ fn reversing_twice_restores_source_and_reversed_audio_survives_save_load() {
         pitch_semitones: 0.0,
         pitch_algorithm: Default::default(),
         preserve_formants: false,
+        name: None,
     };
-    project.add_audio_clip(track, clip).unwrap();
+    project.add_audio_clip(track, clip.clone()).unwrap();
     project.reverse_audio_clip(track, 0).unwrap();
 
     let mut bytes = Vec::new();
     write_project(&project, &mut bytes).unwrap();
     let mut loaded = read_project(bytes.as_slice()).unwrap();
-    let reversed = loaded.audio_track(track).unwrap().clips()[0];
+    let reversed = loaded.audio_track(track).unwrap().clips()[0].clone();
     assert_eq!(
         loaded.audio_asset(reversed.asset).unwrap().samples(),
         project.audio_asset(reversed.asset).unwrap().samples()
     );
 
     loaded.reverse_audio_clip(track, 0).unwrap();
-    let restored = loaded.audio_track(track).unwrap().clips()[0];
+    let restored = loaded.audio_track(track).unwrap().clips()[0].clone();
     assert_eq!(
         loaded.audio_asset(restored.asset).unwrap().samples(),
         original

@@ -32,6 +32,7 @@ fn note(duration_ticks: u64) -> MidiNote {
         key: 64,
         velocity: 89,
         channel: 11,
+        slide_ticks: 0,
     }
 }
 
@@ -46,6 +47,8 @@ fn assignment_removal_and_snapshots_preserve_notes_and_routing() {
         start_tick: 17,
         length_ticks: 960,
         notes: vec![note(480)],
+        name: None,
+        pitch_bend: Vec::new(),
     };
     project.add_midi_clip(track, clip.clone()).unwrap();
     assert_eq!(project.midi_track(track).unwrap().instrument(), None);
@@ -146,13 +149,15 @@ fn every_waveform_and_parameter_round_trips_in_current_version() {
                     start_tick: 17,
                     length_ticks: 960,
                     notes: vec![note(480)],
+                    name: None,
+                    pitch_bend: Vec::new(),
                 },
             )
             .unwrap();
     }
     project.add_midi_track("Unassigned");
     let bytes = encoded(&project);
-    assert_eq!(&bytes[8..12], &13_u32.to_le_bytes());
+    assert_eq!(&bytes[8..12], &16_u32.to_le_bytes());
     let restored = read_project(bytes.as_slice()).unwrap();
     assert_eq!(encoded(&restored), bytes);
     for (before, after) in project.tracks().iter().zip(restored.tracks()) {
@@ -195,7 +200,7 @@ fn independent_version_one_fixture_loads_notes_without_an_instrument() {
     assert_eq!(track.clips()[0].start_tick, 17);
     assert_eq!(track.clips()[0].notes, [note(480)]);
     assert_eq!(restored.duration_frames().unwrap(), 0);
-    assert_eq!(&encoded(&restored)[8..12], &13_u32.to_le_bytes());
+    assert_eq!(&encoded(&restored)[8..12], &16_u32.to_le_bytes());
 }
 
 #[test]
@@ -243,6 +248,8 @@ fn duration_includes_musical_positions_release_tails_and_audio() {
                 start_tick: 960,
                 length_ticks: 960,
                 notes: vec![note(960)],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -276,6 +283,7 @@ fn duration_includes_musical_positions_release_tails_and_audio() {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -298,6 +306,8 @@ fn empty_assigned_clips_and_silence_after_early_notes_retain_their_extent() {
                 start_tick: 0,
                 length_ticks: 3840,
                 notes: vec![note(480)],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -313,6 +323,8 @@ fn empty_assigned_clips_and_silence_after_early_notes_retain_their_extent() {
                 start_tick: 3840,
                 length_ticks: 3840,
                 notes: vec![],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -334,6 +346,8 @@ fn duration_reports_conversion_and_tail_overflow_without_restricting_saved_ticks
                 start_tick: 0,
                 length_ticks: u64::MAX - 4095,
                 notes: vec![note(u64::MAX - 4095)],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();

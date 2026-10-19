@@ -21,6 +21,7 @@ fn one_clip_project(samples: Vec<Frame>) -> (Project, AudioTrackId, AudioClip) {
         pitch_semitones: 0.0,
         pitch_algorithm: Default::default(),
         preserve_formants: false,
+        name: None,
     };
     (project, track, clip)
 }
@@ -59,6 +60,7 @@ fn mixes_stereo_with_offsets_trims_and_gain_without_clipping() {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -116,7 +118,7 @@ fn rendering_is_identical_across_block_sizes() {
             track,
             AudioClip {
                 start_tick: 2,
-                ..clip
+                ..clip.clone()
             },
         )
         .unwrap();
@@ -128,7 +130,7 @@ fn rendering_is_identical_across_block_sizes() {
                 source_start: 5,
                 frame_count: 427,
                 gain: -0.375,
-                ..clip
+                ..clip.clone()
             },
         )
         .unwrap();
@@ -183,6 +185,7 @@ fn default_tempo_places_a_quarter_note_at_half_a_second() {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -217,6 +220,7 @@ fn changing_bpm_moves_audio_without_stretching_or_resampling_its_source() {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -264,6 +268,7 @@ fn fractional_frames_per_tick_have_identical_positions_across_block_sizes() {
                     pitch_semitones: 0.0,
                     pitch_algorithm: Default::default(),
                     preserve_formants: false,
+                    name: None,
                 },
             )
             .unwrap();
@@ -343,21 +348,21 @@ fn invalid_clips_do_not_mutate_the_project() {
         (
             AudioClip {
                 frame_count: 0,
-                ..clip
+                ..clip.clone()
             },
             ProjectError::EmptyClip,
         ),
         (
             AudioClip {
                 gain: f32::NAN,
-                ..clip
+                ..clip.clone()
             },
             ProjectError::NonFiniteGain,
         ),
         (
             AudioClip {
                 gain: f32::INFINITY,
-                ..clip
+                ..clip.clone()
             },
             ProjectError::NonFiniteGain,
         ),
@@ -365,7 +370,7 @@ fn invalid_clips_do_not_mutate_the_project() {
             AudioClip {
                 source_start: u64::MAX,
                 frame_count: 1,
-                ..clip
+                ..clip.clone()
             },
             ProjectError::SourceRangeOverflow,
         ),
@@ -373,7 +378,7 @@ fn invalid_clips_do_not_mutate_the_project() {
             AudioClip {
                 source_start: 3,
                 frame_count: 2,
-                ..clip
+                ..clip.clone()
             },
             ProjectError::SourceRangeOutOfBounds {
                 start: 3,
@@ -385,7 +390,7 @@ fn invalid_clips_do_not_mutate_the_project() {
             AudioClip {
                 start_tick: u64::MAX,
                 frame_count: 1,
-                ..clip
+                ..clip.clone()
             },
             ProjectError::Time(TimeError::ConversionOverflow),
         ),
@@ -397,13 +402,13 @@ fn invalid_clips_do_not_mutate_the_project() {
         render_block(&project, 0, &mut output).unwrap();
         assert_eq!(output, [[0.0; 2]; 4]);
     }
-    project.add_audio_clip(track, clip).unwrap();
+    project.add_audio_clip(track, clip.clone()).unwrap();
     assert_eq!(project.audio_duration_frames(), 4);
 
     let mut other_project = Project::new();
     let other_track = other_project.add_audio_track("Other");
     assert_eq!(
-        other_project.add_audio_clip(other_track, clip),
+        other_project.add_audio_clip(other_track, clip.clone()),
         Err(ProjectError::UnknownAsset { asset: clip.asset })
     );
 }
@@ -422,7 +427,7 @@ fn extreme_finite_arithmetic_is_left_for_output_validation() {
 #[test]
 fn tracks_apply_independent_gain_and_balance_before_master_mixing() {
     let (mut project, first_track, clip) = one_clip_project(vec![[1.0, 2.0]]);
-    project.add_audio_clip(first_track, clip).unwrap();
+    project.add_audio_clip(first_track, clip.clone()).unwrap();
     project
         .set_audio_track_mixer(
             first_track,
@@ -450,7 +455,13 @@ fn tracks_apply_independent_gain_and_balance_before_master_mixing() {
 fn master_mixer_applies_once_to_direct_and_grouped_tracks_without_clipping() {
     let (mut project, grouped, clip) = one_clip_project(vec![[1.0, 2.0]]);
     project
-        .add_audio_clip(grouped, AudioClip { gain: 0.5, ..clip })
+        .add_audio_clip(
+            grouped,
+            AudioClip {
+                gain: 0.5,
+                ..clip.clone()
+            },
+        )
         .unwrap();
     let group = project.add_group_track("Bus");
     project
@@ -487,7 +498,7 @@ fn master_mixer_applies_once_to_direct_and_grouped_tracks_without_clipping() {
 #[test]
 fn master_sums_direct_and_grouped_tracks_before_applying_gain() {
     let (mut project, direct, clip) = one_clip_project(vec![[f32::MAX / 2.0; 2]]);
-    project.add_audio_clip(direct, clip).unwrap();
+    project.add_audio_clip(direct, clip.clone()).unwrap();
     let inverted = project.add_audio_track("Inverted");
     project
         .add_audio_clip(inverted, AudioClip { gain: -1.0, ..clip })
@@ -507,7 +518,13 @@ fn master_sums_direct_and_grouped_tracks_before_applying_gain() {
 fn silent_master_suppresses_all_overflowing_descendants() {
     let (mut project, direct, clip) = one_clip_project(vec![[f32::MAX; 2]]);
     project
-        .add_audio_clip(direct, AudioClip { gain: 2.0, ..clip })
+        .add_audio_clip(
+            direct,
+            AudioClip {
+                gain: 2.0,
+                ..clip.clone()
+            },
+        )
         .unwrap();
     let grouped = project.add_audio_track("Grouped");
     project
@@ -565,7 +582,7 @@ fn balance_endpoints_cut_a_channel_without_crossfeed() {
 #[test]
 fn track_gain_applies_after_summing_its_clips() {
     let (mut project, track, clip) = one_clip_project(vec![[f32::MAX / 2.0; 2]]);
-    project.add_audio_clip(track, clip).unwrap();
+    project.add_audio_clip(track, clip.clone()).unwrap();
     project
         .add_audio_clip(track, AudioClip { gain: -1.0, ..clip })
         .unwrap();
@@ -584,7 +601,7 @@ fn track_gain_applies_after_summing_its_clips() {
 #[test]
 fn disconnected_and_zero_gain_tracks_do_not_contaminate_master() {
     let (mut project, active, clip) = one_clip_project(vec![[0.25, 0.5]]);
-    project.add_audio_clip(active, clip).unwrap();
+    project.add_audio_clip(active, clip.clone()).unwrap();
     let loud_asset = project.add_asset(AudioBuffer::new(vec![[f32::MAX; 2]]).unwrap());
     for mixer in [
         MixerSettings::new(1.0, 0.0, AudioOutput::Disconnected).unwrap(),
@@ -597,7 +614,7 @@ fn disconnected_and_zero_gain_tracks_do_not_contaminate_master() {
                 AudioClip {
                     asset: loud_asset,
                     gain: 2.0,
-                    ..clip
+                    ..clip.clone()
                 },
             )
             .unwrap();
@@ -635,6 +652,7 @@ fn unassigned_midi_clips_are_silent_and_do_not_block_audio() {
             key: 60,
             velocity: 100,
             channel: 0,
+            slide_ticks: 0,
         }],
     ] {
         for start_tick in [0, 1_000] {
@@ -649,6 +667,8 @@ fn unassigned_midi_clips_are_silent_and_do_not_block_audio() {
                         start_tick,
                         length_ticks: 480,
                         notes: notes.clone(),
+                        name: None,
+                        pitch_bend: Vec::new(),
                     },
                 )
                 .unwrap();
@@ -677,7 +697,7 @@ fn empty_midi_tracks_do_not_prevent_audio_rendering() {
 #[test]
 fn group_sums_its_children_before_applying_its_gain() {
     let (mut project, first, clip) = one_clip_project(vec![[f32::MAX / 2.0; 2]]);
-    project.add_audio_clip(first, clip).unwrap();
+    project.add_audio_clip(first, clip.clone()).unwrap();
     let second = project.add_audio_track("Inverted");
     project
         .add_audio_clip(second, AudioClip { gain: -1.0, ..clip })
@@ -702,7 +722,7 @@ fn group_sums_its_children_before_applying_its_gain() {
 #[test]
 fn child_and_group_mixers_apply_once_without_extra_dry_output() {
     let (mut project, first, clip) = one_clip_project(vec![[1.0, 2.0]]);
-    project.add_audio_clip(first, clip).unwrap();
+    project.add_audio_clip(first, clip.clone()).unwrap();
     let group = project.add_group_track("Group");
     project
         .set_audio_track_mixer(
@@ -713,7 +733,13 @@ fn child_and_group_mixers_apply_once_without_extra_dry_output() {
     let second = project.add_audio_track("Second");
     let asset = project.add_asset(AudioBuffer::new(vec![[4.0, 2.0]]).unwrap());
     project
-        .add_audio_clip(second, AudioClip { asset, ..clip })
+        .add_audio_clip(
+            second,
+            AudioClip {
+                asset,
+                ..clip.clone()
+            },
+        )
         .unwrap();
     project
         .set_audio_track_mixer(
@@ -740,7 +766,7 @@ fn child_and_group_mixers_apply_once_without_extra_dry_output() {
 #[test]
 fn nested_groups_render_independently_of_parent_creation_order() {
     let (mut project, first, clip) = one_clip_project(vec![[0.5; 2]]);
-    project.add_audio_clip(first, clip).unwrap();
+    project.add_audio_clip(first, clip.clone()).unwrap();
     let root = project.add_group_track("Root");
     let second = project.add_audio_track("Second");
     project
@@ -803,6 +829,7 @@ fn group_siblings_are_summed_in_track_insertion_order() {
                     pitch_semitones: 0.0,
                     pitch_algorithm: Default::default(),
                     preserve_formants: false,
+                    name: None,
                 },
             )
             .unwrap();
@@ -817,7 +844,7 @@ fn group_siblings_are_summed_in_track_insertion_order() {
 #[test]
 fn silent_groups_suppress_overflowing_descendants() {
     let (mut project, audible, clip) = one_clip_project(vec![[0.25, 0.5]]);
-    project.add_audio_clip(audible, clip).unwrap();
+    project.add_audio_clip(audible, clip.clone()).unwrap();
     let loud = project.add_asset(AudioBuffer::new(vec![[f32::MAX; 2]]).unwrap());
     for mixer in [
         MixerSettings::new(0.0, 0.0, AudioOutput::Master).unwrap(),
@@ -832,7 +859,7 @@ fn silent_groups_suppress_overflowing_descendants() {
                 AudioClip {
                     asset: loud,
                     gain: 2.0,
-                    ..clip
+                    ..clip.clone()
                 },
             )
             .unwrap();
@@ -933,7 +960,10 @@ fn instrument_audio_is_silenced_by_a_disconnected_or_zero_gain_group() {
                     key: 60,
                     velocity: 100,
                     channel: 0,
+                    slide_ticks: 0,
                 }],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -976,7 +1006,10 @@ fn instrument_audio_is_silenced_by_the_master_gain_or_output() {
                     key: 60,
                     velocity: 100,
                     channel: 0,
+                    slide_ticks: 0,
                 }],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -1005,7 +1038,7 @@ fn nested_groups_and_master_preserve_samples_across_block_sizes_and_timeline_end
             first,
             AudioClip {
                 start_tick: u64::MAX - 6143,
-                ..clip
+                ..clip.clone()
             },
         )
         .unwrap();

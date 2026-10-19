@@ -1,7 +1,9 @@
+pub mod audio_file;
 pub mod automation;
 pub mod bounce;
 pub mod builtin;
 pub mod clip;
+pub mod clip_export;
 pub mod instrument;
 pub mod json;
 pub mod pitch;
@@ -10,6 +12,7 @@ pub mod project;
 pub mod project_file;
 pub mod project_json;
 pub mod render;
+pub mod stems;
 pub mod time;
 pub mod track;
 pub mod transport;

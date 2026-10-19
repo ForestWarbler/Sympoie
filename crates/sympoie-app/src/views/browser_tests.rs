@@ -466,6 +466,8 @@ fn browser_device_drop_accepts_group_and_occupied_clip_lane() {
                 start_tick: 0,
                 length_ticks: 9600,
                 notes: Vec::new(),
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();

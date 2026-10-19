@@ -249,6 +249,9 @@ have audio clips instead of notes:
  "frame_count": 96000, "gain": 1.0}
 ```
 
+Any clip can have a `"name"`, shown on the clip in place of its note count
+or track name; leave it out for the default label.
+
 ## Rules
 
 - **Time is in ticks: 960 per quarter note.** In 4/4 a bar is 3840 ticks,
@@ -260,6 +263,18 @@ have audio clips instead of notes:
   (60 = middle C, 36 = C2), `velocity` 1–127 (default 100), `channel` 0–15
   (default 0). Notes outside `0..length_ticks` (shifted by `offset_ticks`)
   are kept but silent.
+- **Slides and pitch bend.** A note's optional `"slide"` (ticks, default 0)
+  glides into it from the previous note's pitch over that time without
+  restarting its envelope, on instruments that support it (Ferro). A clip's
+  optional `"bend"` is a list of `{"tick": T, "value": V}` points in the same
+  clip-relative ticks as notes, with strictly increasing ticks; `value` runs
+  −8192 to 8191 (0 = no bend, the ends = the instrument's bend range). The
+  bend ramps linearly between points and holds before the first and after
+  the last; it returns to 0 when the clip ends.
+- **Ferro's Engine** (parameter 70): 0 plays the realtime engine; 1 renders
+  the track's notes in the background with the slower, more accurate offline
+  engine and plays that render. Bounce and export always use the offline
+  engine.
 - **IDs are permanent.** Keep existing `id`s exactly. Leave `id` out of new
   tracks, clips and devices and Sympoie assigns one. Never reuse an ID.
 - **References use track IDs**, never positions: an `output` of
@@ -270,7 +285,12 @@ have audio clips instead of notes:
 - **Automation** lanes hold `[tick, value]` points with values normalized
   0–1. For `"target": "gain"`, 0.5 is unity and 1.0 is +6 dB; for `"pan"`,
   0.5 is centre. A device parameter's target is
-  `{"device": ID, "parameter": ID}`, normalized over its range.
+  `{"device": ID, "parameter": ID}`, normalized over its range. An
+  automated control still works as a trim: a lane's optional `"anchor"` is
+  the control value (normalized like the lane) at which the lane plays as
+  written. Moving the control away shifts the whole lane by the difference,
+  or for `gain` scales it, capped to 0–1. Left out, `anchor` is the
+  control's current value, so the lane plays exactly as written.
 - **External plug-ins** (`"plugin": {...}`) store `"normalized"` 0–1
   parameter values; their sound also depends on `state`, which you can't
   edit. Prefer built-in devices for anything you need to set exactly.

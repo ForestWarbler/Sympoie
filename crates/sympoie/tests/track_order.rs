@@ -89,6 +89,7 @@ fn fixture() -> Project {
                     pitch_semitones: 0.0,
                     pitch_algorithm: Default::default(),
                     preserve_formants: false,
+                    name: None,
                 },
             )
             .unwrap();
@@ -100,6 +101,7 @@ fn fixture() -> Project {
         key: 60,
         velocity: 87,
         channel: 2,
+        slide_ticks: 0,
     });
     project.add_midi_clip(midi, midi_clip).unwrap();
     project

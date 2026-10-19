@@ -1,8 +1,10 @@
 use std::collections::BTreeSet;
 
 use eframe::egui;
+use sympoie::automation::AutomationTarget;
 use sympoie::plugin::PluginDescriptor;
 use sympoie::project::Project;
+use sympoie::transport::PlaybackState;
 
 use super::{PluginLoad, SympoieApp, track_plugin_ids};
 use crate::actions::Action;
@@ -74,6 +76,28 @@ impl SympoieApp {
         });
     }
 
+    /// Built-in editors and scopes stay above the main window like third-party editors,
+    /// so a scope keeps showing while the knobs it monitors are being turned.
+    pub(super) fn keep_tool_windows_above_main(&self, visible_plugins: &BTreeSet<u64>) {
+        let Some(owner) = self.plugin_window_owner.as_ref() else {
+            return;
+        };
+        let project = self.document.project();
+        let editors = self
+            .vst3_editors
+            .intersection(visible_plugins)
+            .map(|id| (id, false));
+        for (&id, scope) in editors.chain(self.scope_windows.iter().map(|id| (id, true))) {
+            if let Some(plugin) = project.plugin(id) {
+                owner.adopt_windows_titled(&if scope {
+                    devices::builtin_scope_title(plugin)
+                } else {
+                    devices::vst3_editor_title(plugin)
+                });
+            }
+        }
+    }
+
     pub(super) fn forget_closed_editor_viewports(&mut self, ctx: &egui::Context) {
         ctx.input(|input| {
             let closed = |id| {
@@ -87,6 +111,8 @@ impl SympoieApp {
                 .retain(|&track| !closed(devices::editor_viewport_id(track)));
             self.vst3_editors
                 .retain(|&id| !closed(devices::vst3_editor_viewport_id(id)));
+            self.scope_windows
+                .retain(|&id| !closed(devices::builtin_scope_viewport_id(id)));
         });
     }
 
@@ -114,6 +140,31 @@ impl SympoieApp {
             .tracks()
             .iter()
             .position(|track| track_plugin_ids(track).any(|candidate| candidate == id))
+    }
+
+    /// During playback an automated parameter's editor shows the trimmed lane,
+    /// so a knob turned there sets what plays now. Convert that to the stored
+    /// value whose trim gives it, so the turn moves the whole lane.
+    fn untrimmed_plugin_edit(&self, id: u64, parameter: u32, value: f64) -> f64 {
+        if self.status.state != PlaybackState::Playing {
+            return value;
+        }
+        let target = AutomationTarget::PluginParameter {
+            plugin: id,
+            parameter,
+        };
+        let tick = self.playhead() as f64;
+        self.plugin_track(id)
+            .and_then(|track| {
+                self.document.project().tracks()[track]
+                    .automation()
+                    .iter()
+                    .find(|lane| lane.target() == target)
+            })
+            .and_then(|lane| Some((lane.value_at(tick)?, lane.anchor()?)))
+            .map_or(value, |(shape, anchor)| {
+                target.base_for(value, shape, anchor)
+            })
     }
 
     pub(super) fn select_editor_track(&mut self, track: usize) {
@@ -151,6 +202,12 @@ impl SympoieApp {
 
     pub(super) fn poll_plugins(&mut self, ctx: &egui::Context) {
         self.plugins.service();
+        // Keys a third-party editor window forwarded because the plugin has no use for them.
+        for key in vst3_host::take_editor_keys() {
+            match key {
+                vst3_host::EditorKey::Space => self.apply(ctx, Action::TogglePlay),
+            }
+        }
         if self.plugins.take_state_dirty() {
             self.document.mark_external_state_dirty();
         }
@@ -163,6 +220,7 @@ impl SympoieApp {
             editor.is_open()
         });
         for (id, parameter, value) in self.plugins.poll_edits() {
+            let value = self.untrimmed_plugin_edit(id, parameter, value);
             if self
                 .document
                 .project()

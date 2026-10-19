@@ -25,6 +25,7 @@ fn audio(project: &mut Project, samples: Vec<Frame>) -> AudioTrackId {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -198,6 +199,7 @@ fn stopped_audition_peaks_follow_instrument_and_bus_output() {
             key: 60,
             velocity: 100,
             channel: 0,
+            slide_ticks: 0,
         }]
     ));
     let mut output = [[0.0; 2]; 512];

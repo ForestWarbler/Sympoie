@@ -137,9 +137,13 @@ impl SympoieApp {
                                 (format!("{command}G"), "Group selected tracks"),
                                 (format!("{command}Z / {shift}{command}Z"), "Undo / redo"),
                                 (format!("{command}I"), "Import audio"),
-                                (format!("{shift}{command}R"), "Export audio"),
+                                (format!("{shift}{command}R"), "Open the Export window"),
                                 ("Alt while dragging".to_owned(), "Ignore the grid"),
                                 ("Double-click name".to_owned(), "Rename a track"),
+                                (
+                                    "Right-click clip title".to_owned(),
+                                    "Rename a clip or export it as a file",
+                                ),
                                 (
                                     "Click lane / clip body".to_owned(),
                                     "Set the next playback start",
@@ -230,6 +234,7 @@ impl SympoieApp {
                          later; you may redistribute and change it under its terms.\n\
                          There is NO WARRANTY, to the extent permitted by law.\n\
                          See LICENSE, and THIRD_PARTY_LICENSES.md for the components it includes.\n\
+                         MP3 files are encoded with LAME (lame.sourceforge.io), FLAC files with flacenc.\n\
                          Music and projects you make with Sympoie are yours, under any terms you choose.",
                     ).size(10.5).color(theme::TEXT_DIM));
                 });

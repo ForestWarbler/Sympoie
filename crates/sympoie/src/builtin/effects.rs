@@ -1,5 +1,8 @@
 use std::f64::consts::TAU;
-use std::sync::{Arc, atomic::Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU32, Ordering},
+};
 
 use crate::instrument::NoteEvent;
 use crate::plugin::{PluginInstance, PluginProcessContext, PluginProcessor, PluginSidechainInput};
@@ -7,12 +10,12 @@ use crate::{Frame, SAMPLE_RATE};
 
 use super::{ParameterSpec, Scale, Telemetry};
 
-const RATE: f64 = SAMPLE_RATE as f64;
-const SMOOTH: f64 = 1.0 / (RATE * 0.010);
+pub(super) const RATE: f64 = SAMPLE_RATE as f64;
+pub(super) const SMOOTH: f64 = 1.0 / (RATE * 0.010);
 const FFT_SIZE: usize = 8192;
 const FFT_HOP: usize = 2048;
 
-const fn parameter(
+pub(super) const fn parameter(
     id: u32,
     name: &'static str,
     unit: &'static str,
@@ -170,7 +173,7 @@ pub fn comp_parameters() -> Vec<ParameterSpec> {
     COMP_PARAMETERS.to_vec()
 }
 
-fn physical_values<const N: usize>(
+pub(super) fn physical_values<const N: usize>(
     instance: &PluginInstance,
     specs: &[ParameterSpec; N],
 ) -> [f64; N] {
@@ -183,17 +186,17 @@ fn physical_values<const N: usize>(
     })
 }
 
-fn amplitude(db: f64) -> f64 {
+pub(super) fn amplitude(db: f64) -> f64 {
     10.0_f64.powf(db / 20.0)
 }
-fn decibels(level: f64) -> f64 {
+pub(super) fn decibels(level: f64) -> f64 {
     20.0 * level.max(1.0e-6).log10()
 }
-fn clean(sample: f64) -> f64 {
+pub(super) fn clean(sample: f64) -> f64 {
     if sample.is_finite() { sample } else { 0.0 }
 }
 
-fn smooth(current: &mut f64, target: f64) {
+pub(super) fn smooth(current: &mut f64, target: f64) {
     let difference = target - *current;
     if difference.abs() < 1.0e-12 {
         *current = target;
@@ -202,7 +205,7 @@ fn smooth(current: &mut f64, target: f64) {
     }
 }
 
-fn output_sample(value: f64) -> f32 {
+pub(super) fn output_sample(value: f64) -> f32 {
     clean(value).clamp(-f64::from(f32::MAX), f64::from(f32::MAX)) as f32
 }
 
@@ -416,7 +419,7 @@ impl FilterState {
 }
 
 #[derive(Debug)]
-struct Analyzer {
+pub(super) struct Analyzer {
     ring: Box<[Frame]>,
     data: Box<[Complex]>,
     window: Box<[f64]>,
@@ -431,7 +434,7 @@ struct Analyzer {
 }
 
 impl Analyzer {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let window: Box<[f64]> = (0..FFT_SIZE)
             .map(|i| 0.5 - 0.5 * (TAU * i as f64 / FFT_SIZE as f64).cos())
             .collect();
@@ -471,20 +474,14 @@ impl Analyzer {
             since_fft: 0,
         }
     }
-    fn reset(&mut self) {
-        self.ring.fill([0.0; 2]);
-        self.display.fill(-120.0);
-        self.position = 0;
-        self.filled = 0;
-        self.since_fft = 0;
-    }
-    fn push(&mut self, frame: Frame, telemetry: &Telemetry) {
+    /// Adds a frame; returns whether the spectrum was refreshed.
+    pub(super) fn push(&mut self, frame: Frame, spectrum: &[AtomicU32; 128]) -> bool {
         self.ring[self.position] = frame;
         self.position = (self.position + 1) & (FFT_SIZE - 1);
         self.filled = (self.filled + 1).min(FFT_SIZE);
         self.since_fft += 1;
         if self.filled < FFT_SIZE || self.since_fft < FFT_HOP {
-            return;
+            return false;
         }
         self.since_fft = 0;
         for i in 0..FFT_SIZE {
@@ -517,25 +514,26 @@ impl Analyzer {
             let db = 10.0 * power.max(1.0e-12).log10();
             self.display[i] +=
                 (db - self.display[i]) * if db > self.display[i] { 0.85 } else { 0.22 };
-            telemetry.spectrum[i].store((self.display[i] as f32).to_bits(), Ordering::Relaxed);
+            spectrum[i].store((self.display[i] as f32).to_bits(), Ordering::Relaxed);
         }
+        true
     }
 }
 
 #[derive(Debug, Default)]
-struct Meters {
+pub(super) struct Meters {
     input: f64,
     output: f64,
     reduction: f64,
 }
 impl Meters {
-    fn frame(&mut self, input: [f64; 2], output: [f64; 2], reduction: f64) {
+    pub(super) fn frame(&mut self, input: [f64; 2], output: [f64; 2], reduction: f64) {
         const DECAY: f64 = 1.0 - 1.0 / (RATE * 0.300);
         self.input = (self.input * DECAY).max(input[0].abs().max(input[1].abs()));
         self.output = (self.output * DECAY).max(output[0].abs().max(output[1].abs()));
         self.reduction = (self.reduction * DECAY).max(reduction);
     }
-    fn publish(&self, telemetry: &Telemetry) {
+    pub(super) fn publish(&self, telemetry: &Telemetry) {
         telemetry
             .input_db
             .store((decibels(self.input) as f32).to_bits(), Ordering::Relaxed);
@@ -589,14 +587,10 @@ impl PluginProcessor for EqProcessor {
         self.gain = amplitude(self.values[30]);
         self.mix = self.values[31] / 100.0;
         self.meters = Meters::default();
-        if let Some(analyzer) = &mut self.analyzer {
-            analyzer.reset();
-        }
+        // The analyzer is display state, not audio state: keeping it lets the spectrum run
+        // on through a loop wrap instead of blanking until a new FFT window fills.
         if let Some(telemetry) = &self.telemetry {
             self.meters.publish(telemetry);
-            for value in &telemetry.spectrum {
-                value.store((-120.0_f32).to_bits(), Ordering::Relaxed);
-            }
         }
     }
     fn event(&mut self, _event: NoteEvent) {}
@@ -634,8 +628,10 @@ impl PluginProcessor for EqProcessor {
             }
             if let Some(telemetry) = &self.telemetry {
                 self.meters.frame(input, output, 0.0);
-                if let Some(analyzer) = &mut self.analyzer {
-                    analyzer.push(*frame, telemetry);
+                if let Some(analyzer) = &mut self.analyzer
+                    && analyzer.push(*frame, &telemetry.spectrum)
+                {
+                    telemetry.spectrum_updates.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }

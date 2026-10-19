@@ -6,6 +6,7 @@ fn context() -> PluginProcessContext {
         frame: 0,
         bpm: 120.0,
         playing: true,
+        quality: crate::plugin::RenderQuality::Realtime,
     }
 }
 fn on(id: u64, key: u8) -> NoteEvent {
@@ -14,6 +15,7 @@ fn on(id: u64, key: u8) -> NoteEvent {
         key,
         velocity: 127,
         channel: 0,
+        slide_frames: 0,
     }
 }
 fn set(instance: &mut PluginInstance, id: u32, physical: f64) {

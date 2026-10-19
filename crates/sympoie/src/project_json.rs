@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use crate::automation::{AutomationLane, AutomationPoint, AutomationTarget, SubtractiveParameter};
 use crate::builtin::{self, BuiltinKind, ParameterSpec};
-use crate::clip::{AudioClip, MidiClip, MidiNote};
+use crate::clip::{AudioClip, BEND_MAX, BEND_MIN, BendPoint, MidiClip, MidiNote};
 use crate::instrument::{Instrument, SubtractiveSettings, Waveform};
 use crate::json::{self, Value};
 use crate::pitch::PitchAlgorithm;
@@ -506,6 +506,11 @@ fn write_track(
                 if !lane.enabled() {
                     entry.push("enabled", false);
                 }
+                if let Some(anchor) = lane.anchor()
+                    && Some(anchor) != lane.target().value(track)
+                {
+                    entry.push("anchor", anchor);
+                }
                 entry.with(
                     "points",
                     lane.points()
@@ -540,6 +545,9 @@ fn write_track(
                     if clip.preserve_formants {
                         entry.push("preserve_formants", true);
                     }
+                    if let Some(name) = &clip.name {
+                        entry.push("name", name.as_str());
+                    }
                     entry
                 })
                 .collect();
@@ -558,6 +566,9 @@ fn write_track(
                     if clip.offset_ticks != 0 {
                         entry.push("offset_ticks", clip.offset_ticks);
                     }
+                    if let Some(name) = &clip.name {
+                        entry.push("name", name.as_str());
+                    }
                     let notes: Vec<Value> = clip
                         .notes
                         .iter()
@@ -570,9 +581,24 @@ fn write_track(
                             if note.channel != 0 {
                                 entry.push("channel", note.channel);
                             }
+                            if note.slide_ticks != 0 {
+                                entry.push("slide", note.slide_ticks);
+                            }
                             entry
                         })
                         .collect();
+                    if !clip.pitch_bend.is_empty() {
+                        let bend: Vec<Value> = clip
+                            .pitch_bend
+                            .iter()
+                            .map(|point| {
+                                Value::object()
+                                    .with("tick", point.tick)
+                                    .with("value", i64::from(point.value))
+                            })
+                            .collect();
+                        entry.push("bend", bend);
+                    }
                     entry.with("notes", notes)
                 })
                 .collect();
@@ -1216,7 +1242,9 @@ impl<'a> Loader<'a, '_> {
                     .into_iter()
                     .find(|candidate| builtin_name(*candidate) == name)
                     .ok_or_else(|| {
-                        builtin.error("must be \"oscil\", \"sampler\", \"eq\" or \"comp\"")
+                        builtin.error(
+                            "must be \"oscil\", \"sampler\", \"eq\", \"comp\", \"vari-mu\", \"rain\" or \"ferro\"",
+                        )
                     })?;
                 let descriptor = builtin_kind.descriptor();
                 if descriptor.kind != kind {
@@ -1397,7 +1425,7 @@ impl<'a> Loader<'a, '_> {
     }
 
     fn lane(&mut self, node: &Node<'a>, id: TrackId) -> Result<(), ProjectFileError> {
-        node.only(&["target", "enabled", "points"])?;
+        node.only(&["target", "enabled", "anchor", "points"])?;
         let target_node = node.field("target");
         let target = match &target_node.value {
             Value::String(name) => match name.as_str() {
@@ -1442,6 +1470,16 @@ impl<'a> Loader<'a, '_> {
         let lane = AutomationLane::new(target, points)
             .map_err(|error| node.field("points").error(error))?
             .with_enabled(node.bool_or("enabled", true)?);
+        let lane = match node.optional("anchor") {
+            Some(anchor) => {
+                let value = anchor.as_f64()?;
+                if !(0.0..=1.0).contains(&value) {
+                    return Err(anchor.error("must be between 0 and 1"));
+                }
+                lane.with_anchor(Some(value))
+            }
+            None => lane,
+        };
         self.project
             .set_track_automation(id, lane)
             .map_err(|error| node.error(error))
@@ -1466,6 +1504,7 @@ impl<'a> Loader<'a, '_> {
                     "pitch",
                     "pitch_algorithm",
                     "preserve_formants",
+                    "name",
                 ])?;
                 let sample = node.field("sample");
                 let reference = sample.as_str()?;
@@ -1507,15 +1546,24 @@ impl<'a> Loader<'a, '_> {
                         },
                     },
                     preserve_formants: node.bool_or("preserve_formants", false)?,
+                    name: clip_name(node)?,
                 };
                 self.add_without_snapping(node, |project| project.add_audio_clip(track, clip))?;
             }
             TrackId::Midi(track) => {
-                node.only(&["id", "start_tick", "length_ticks", "offset_ticks", "notes"])?;
+                node.only(&[
+                    "id",
+                    "start_tick",
+                    "length_ticks",
+                    "offset_ticks",
+                    "notes",
+                    "bend",
+                    "name",
+                ])?;
                 let mut notes = Vec::new();
                 if let Some(list) = node.optional("notes") {
                     for note in list.items()? {
-                        note.only(&["start", "length", "key", "velocity", "channel"])?;
+                        note.only(&["start", "length", "key", "velocity", "channel", "slide"])?;
                         let key = note.field("key");
                         let key_value = key.as_u8()?;
                         if key_value > 127 {
@@ -1539,6 +1587,30 @@ impl<'a> Loader<'a, '_> {
                             key: key_value,
                             velocity,
                             channel,
+                            slide_ticks: note.optional("slide").map_or(Ok(0), |n| n.as_u32())?,
+                        });
+                    }
+                }
+                let mut pitch_bend: Vec<BendPoint> = Vec::new();
+                if let Some(list) = node.optional("bend") {
+                    for point in list.items()? {
+                        point.only(&["tick", "value"])?;
+                        let tick = point.u64("tick")?;
+                        if pitch_bend.last().is_some_and(|last| last.tick >= tick) {
+                            return Err(point
+                                .field("tick")
+                                .error("must increase from point to point"));
+                        }
+                        let field = point.field("value");
+                        let value = field.as_f64()?;
+                        if value.fract() != 0.0
+                            || !(f64::from(BEND_MIN)..=f64::from(BEND_MAX)).contains(&value)
+                        {
+                            return Err(field.error("must be a whole number from -8192 to 8191"));
+                        }
+                        pitch_bend.push(BendPoint {
+                            tick,
+                            value: value as i16,
                         });
                     }
                 }
@@ -1547,6 +1619,8 @@ impl<'a> Loader<'a, '_> {
                     length_ticks: node.u64("length_ticks")?,
                     offset_ticks: node.u64_or("offset_ticks", 0)?,
                     notes,
+                    name: clip_name(node)?,
+                    pitch_bend,
                 };
                 self.add_without_snapping(node, |project| project.add_midi_clip(track, clip))?;
             }
@@ -1795,4 +1869,12 @@ fn kind_or_missing(value: &Value, node: &Node<'_>) -> &'static str {
     } else {
         value.kind()
     }
+}
+
+fn clip_name(node: &Node<'_>) -> Result<Option<String>, ProjectFileError> {
+    Ok(node
+        .optional("name")
+        .map(|name| name.as_str())
+        .transpose()?
+        .and_then(crate::clip::normalized_clip_name))
 }

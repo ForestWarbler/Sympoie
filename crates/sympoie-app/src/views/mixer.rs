@@ -259,11 +259,12 @@ fn builtin_inspector(
         .shrink2(vec2(8.0, 2.0));
     widgets::inside(ui, header, Layout::left_to_right(Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        let routing_width = if kind == BuiltinKind::Comp && runtime.is_some() {
-            84.0
-        } else {
-            0.0
-        };
+        let routing_width =
+            if matches!(kind, BuiltinKind::Comp | BuiltinKind::VariMu) && runtime.is_some() {
+                84.0
+            } else {
+                0.0
+            };
         ui.add_sized(
             vec2((header.width() - 74.0 - routing_width).max(20.0), 20.0),
             egui::Label::new(
@@ -278,7 +279,7 @@ fn builtin_inspector(
             )
             .truncate(),
         );
-        if kind == BuiltinKind::Comp
+        if matches!(kind, BuiltinKind::Comp | BuiltinKind::VariMu)
             && let Some(runtime) = runtime
         {
             crate::views::devices::inline_sidechain_button(

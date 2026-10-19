@@ -118,7 +118,9 @@ pub use plugin::{
 };
 pub use realtime::{RealtimePluginRunner, RtControl};
 pub use transport::{AutomationLane, BlockEvents, MidiClip, Timeline};
-pub use window::{PluginWindow, PluginWindowOwner};
+pub use window::{
+    set_editor_key_waker, take_editor_keys, EditorKey, PluginWindow, PluginWindowOwner,
+};
 
 /// Prelude module for convenient imports
 pub mod prelude {

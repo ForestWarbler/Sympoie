@@ -33,6 +33,7 @@ fn mixed_project() -> (Project, ClipRef) {
                 pitch_semitones: 0.0,
                 pitch_algorithm: PitchAlgorithm::Builtin,
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -50,7 +51,10 @@ fn mixed_project() -> (Project, ClipRef) {
                     key: 60,
                     velocity: 100,
                     channel: 0,
+                    slide_ticks: 0,
                 }],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -81,7 +85,7 @@ fn render_audio(project: &Project) -> Vec<Frame> {
 #[test]
 fn reverse_range_isolates_exact_audio_frames_and_preserves_midi_and_hidden_data() {
     let (mut project, source) = mixed_project();
-    let original = *edit::audio_clip(&project, source).unwrap();
+    let original = (edit::audio_clip(&project, source).unwrap()).clone();
     let original_midi = midi_clips(&project);
     let source_data = source_samples();
     project.set_snap_grid(SnapGrid::Bar);
@@ -208,7 +212,7 @@ fn audio_processing_rejects_empty_or_midi_only_ranges_without_an_undo_step() {
 #[test]
 fn clip_pitch_survives_copy_split_trim_reverse_and_document_history() {
     let (project, source) = mixed_project();
-    let original = *edit::audio_clip(&project, source).unwrap();
+    let original = (edit::audio_clip(&project, source).unwrap()).clone();
     let mut document = Document::new(project, Some("pitch.symp".into()));
     assert!(
         document
@@ -235,7 +239,7 @@ fn clip_pitch_survives_copy_split_trim_reverse_and_document_history() {
         pitch_semitones: 7.5,
         pitch_algorithm: PitchAlgorithm::RubberBandR3,
         preserve_formants: true,
-        ..original
+        ..original.clone()
     };
     assert_eq!(edit::audio_clip(document.project(), source), Some(&pitched));
     let edited = document
@@ -267,7 +271,10 @@ fn clip_pitch_survives_copy_split_trim_reverse_and_document_history() {
     );
 
     document.undo();
-    assert_eq!(audio_clips(document.project()), [pitched]);
+    assert_eq!(
+        audio_clips(document.project()),
+        std::slice::from_ref(&pitched)
+    );
     document.undo();
     assert_eq!(audio_clips(document.project()), [original]);
     assert!(!document.is_dirty());
@@ -280,7 +287,7 @@ fn clip_pitch_survives_copy_split_trim_reverse_and_document_history() {
 #[test]
 fn pitch_options_are_undoable_at_zero_pitch_without_changing_source_or_duration() {
     let (project, source) = mixed_project();
-    let original = *edit::audio_clip(&project, source).unwrap();
+    let original = (edit::audio_clip(&project, source).unwrap()).clone();
     let mut document = Document::new(project, Some("options.symp".into()));
     for (algorithm, preserve_formants) in [
         (PitchAlgorithm::Signalsmith, true),
@@ -294,7 +301,7 @@ fn pitch_options_are_undoable_at_zero_pitch_without_changing_source_or_duration(
         let expected = AudioClip {
             pitch_algorithm: algorithm,
             preserve_formants,
-            ..original
+            ..original.clone()
         };
         assert_eq!(
             edit::audio_clip(document.project(), source),

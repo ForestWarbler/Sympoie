@@ -4,7 +4,6 @@ use sympoie::project::{AudioBuffer, Project};
 use sympoie::wav::read_wav;
 
 use super::{SympoieApp, file_name, has_extension};
-use crate::audio::export::ExportJob;
 use crate::document::Document;
 use crate::document::edit;
 
@@ -179,68 +178,5 @@ impl SympoieApp {
                 ));
             }
         }
-    }
-
-    pub(super) fn export_audio(&mut self, loop_only: bool) {
-        self.release_preview_before_dialog();
-        if self.export.is_some() || self.bounce.is_some() {
-            self.warn("Wait for the current bounce or export, or cancel it first.".into());
-            return;
-        }
-        let project = self.document.project();
-        let tempo = project.tempo();
-        let (start, frames) = if loop_only {
-            let (Ok(start), Ok(end)) = (
-                tempo.ticks_to_frames(self.loop_region.start),
-                tempo.ticks_to_frames(self.loop_region.end),
-            ) else {
-                self.error("The loop region cannot be converted to audio frames".to_owned());
-                return;
-            };
-            (start, end.saturating_sub(start))
-        } else {
-            match project.duration_frames() {
-                Ok(frames) => (0, frames),
-                Err(error) => {
-                    self.error(format!("Couldn't calculate the export length: {error}"));
-                    return;
-                }
-            }
-        };
-        if frames == 0 {
-            self.warn("There is no audio to export yet".to_owned());
-            return;
-        }
-        let stem = self
-            .document
-            .display_name()
-            .trim_end_matches(".symp")
-            .to_owned();
-        let Some(mut path) = rfd::FileDialog::new()
-            .set_title("Export Audio")
-            .add_filter("WAV audio", &["wav"])
-            .set_file_name(format!("{stem}.wav"))
-            .save_file()
-        else {
-            return;
-        };
-        if !has_extension(&path, "wav") {
-            path.set_extension("wav");
-        }
-        let project = match self.project_with_plugin_state() {
-            Ok(project) => project,
-            Err(error) => {
-                self.error(format!("Couldn't capture plugin state for export: {error}"));
-                return;
-            }
-        };
-        let plugins = match self.plugins.prepare_offline(&project) {
-            Ok(plugins) => plugins,
-            Err(error) => {
-                self.error(format!("Couldn't prepare plugins for export: {error}"));
-                return;
-            }
-        };
-        self.export = Some(ExportJob::start(project, plugins, path, start, frames));
     }
 }

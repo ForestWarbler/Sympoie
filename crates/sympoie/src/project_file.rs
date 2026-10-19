@@ -10,7 +10,7 @@ use crate::automation::{
     AutomationLane, AutomationPoint, AutomationTarget, MAX_AUTOMATION_LANES, MAX_AUTOMATION_POINTS,
     SubtractiveParameter,
 };
-use crate::clip::{AudioClip, MidiClip, MidiNote};
+use crate::clip::{AudioClip, BEND_MIN, BendPoint, MidiClip, MidiNote};
 use crate::instrument::{Instrument, SubtractiveSettings, Waveform};
 use crate::pitch::PitchAlgorithm;
 use crate::plugin::{
@@ -26,7 +26,7 @@ use crate::track::{
 use crate::{SAMPLE_RATE, TICKS_PER_QUARTER};
 
 const MAGIC: &[u8; 8] = b"SYMPROJ\0";
-const VERSION: u32 = 13;
+const VERSION: u32 = 16;
 pub const PROJECT_MANIFEST: &str = "project.symp";
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -435,6 +435,7 @@ fn write_project_assets(
                         PitchAlgorithm::RubberBandR3 => 2,
                     })?;
                     out.u8(u8::from(clip.preserve_formants))?;
+                    out.string(clip.name.as_deref().unwrap_or_default())?;
                 }
             }
             Track::Midi(track) => {
@@ -465,6 +466,7 @@ fn write_project_assets(
                     out.u64(clip.start_tick)?;
                     out.u64(clip.length_ticks)?;
                     out.u64(clip.offset_ticks)?;
+                    out.string(clip.name.as_deref().unwrap_or_default())?;
                     out.u64(clip.notes.len() as u64)?;
                     for note in &clip.notes {
                         out.u64(note.start_tick)?;
@@ -472,6 +474,12 @@ fn write_project_assets(
                         out.u8(note.key)?;
                         out.u8(note.velocity)?;
                         out.u8(note.channel)?;
+                        out.u32(note.slide_ticks)?;
+                    }
+                    out.u64(clip.pitch_bend.len() as u64)?;
+                    for point in &clip.pitch_bend {
+                        out.u64(point.tick)?;
+                        out.u32(point.value as u16 as u32)?;
                     }
                 }
             }
@@ -543,6 +551,7 @@ fn write_project_assets(
                 }
             }
             out.u8(u8::from(lane.enabled()))?;
+            out.f64(lane.anchor().unwrap_or(f64::NAN))?;
             out.u64(lane.points().len() as u64)?;
             for point in lane.points() {
                 out.u64(point.tick)?;
@@ -699,7 +708,9 @@ fn read_project_with_base(
         let id: TrackId = match kind {
             0 => {
                 let id = project.add_audio_track(name);
-                let clip_count = input.count(if version >= 10 {
+                let clip_count = input.count(if version >= 15 {
+                    50
+                } else if version >= 10 {
                     42
                 } else if version >= 9 {
                     40
@@ -738,6 +749,11 @@ fn read_project_with_base(
                             } else {
                                 false
                             },
+                            name: if version >= 15 {
+                                clip_name(input.string()?)
+                            } else {
+                                None
+                            },
                         },
                     )?;
                 }
@@ -774,12 +790,17 @@ fn read_project_with_base(
                     };
                     project.set_midi_track_instrument(id, instrument)?;
                 }
-                let clip_count = input.count(24)?;
+                let clip_count = input.count(if version >= 15 { 32 } else { 24 })?;
                 for _ in 0..clip_count {
                     let start_tick = input.u64()?;
                     let length_ticks = input.u64()?;
                     let offset_ticks = if version >= 5 { input.u64()? } else { 0 };
-                    let note_count = input.count(19)?;
+                    let name = if version >= 15 {
+                        clip_name(input.string()?)
+                    } else {
+                        None
+                    };
+                    let note_count = input.count(if version >= 16 { 23 } else { 19 })?;
                     let mut notes = Vec::with_capacity(note_count);
                     for _ in 0..note_count {
                         notes.push(MidiNote {
@@ -788,7 +809,25 @@ fn read_project_with_base(
                             key: input.u8()?,
                             velocity: input.u8()?,
                             channel: input.u8()?,
+                            slide_ticks: if version >= 16 { input.u32()? } else { 0 },
                         });
+                    }
+                    let mut pitch_bend = Vec::new();
+                    if version >= 16 {
+                        let point_count = input.count(12)?;
+                        pitch_bend.reserve(point_count);
+                        for _ in 0..point_count {
+                            let tick = input.u64()?;
+                            let value = input.u32()? as u16 as i16;
+                            if value < BEND_MIN
+                                || pitch_bend
+                                    .last()
+                                    .is_some_and(|p: &BendPoint| p.tick >= tick)
+                            {
+                                return Err(ProjectFileError::InvalidFormat("invalid pitch bend"));
+                            }
+                            pitch_bend.push(BendPoint { tick, value });
+                        }
                     }
                     project.add_midi_clip(
                         id,
@@ -797,6 +836,8 @@ fn read_project_with_base(
                             length_ticks,
                             offset_ticks,
                             notes,
+                            pitch_bend,
+                            name,
                         },
                     )?;
                 }
@@ -923,6 +964,11 @@ fn read_project_with_base(
                     ));
                 }
                 let enabled = input.boolean()?;
+                let anchor = if version >= 14 {
+                    Some(input.f64()?)
+                } else {
+                    None
+                };
                 let count = input.count(16)?;
                 if count > MAX_AUTOMATION_POINTS {
                     return Err(ProjectError::TooManyAutomationPoints.into());
@@ -936,7 +982,9 @@ fn read_project_with_base(
                 }
                 project.set_track_automation(
                     *id,
-                    AutomationLane::new(target, points)?.with_enabled(enabled),
+                    AutomationLane::new(target, points)?
+                        .with_enabled(enabled)
+                        .with_anchor(anchor),
                 )?;
             }
         }
@@ -1000,6 +1048,11 @@ fn read_project_with_base(
             TrackId::Bus(id) => project.set_bus_track_mixer(id, mixer)?,
             TrackId::Master(_) => project.set_master_track_mixer(mixer)?,
         }
+    }
+    if version < 14 {
+        // Older files had no trims, and their lanes were added before the
+        // mixer settings above, so anchor them to the loaded values now.
+        project.reanchor_automation();
     }
     for (id, destination, gain) in sends {
         project.set_track_send(id, destination, gain)?;
@@ -1135,7 +1188,7 @@ impl<'a> Decoder<'a> {
         let count = self.count(1)?;
         let bytes = self.take(count)?;
         let value = std::str::from_utf8(bytes)
-            .map_err(|_| ProjectFileError::InvalidFormat("track name is not UTF-8"))?;
+            .map_err(|_| ProjectFileError::InvalidFormat("name is not UTF-8"))?;
         Ok(value.to_owned())
     }
 
@@ -1275,6 +1328,10 @@ impl From<TimeError> for ProjectFileError {
     fn from(error: TimeError) -> Self {
         Self::Project(error.into())
     }
+}
+
+fn clip_name(name: String) -> Option<String> {
+    crate::clip::normalized_clip_name(&name)
 }
 
 #[cfg(test)]

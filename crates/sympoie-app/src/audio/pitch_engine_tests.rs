@@ -28,6 +28,7 @@ fn audio_project(frames: usize, pitch: f32) -> (Project, AudioTrackId) {
                 pitch_semitones: pitch,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -143,7 +144,7 @@ fn replacement_discards_old_completion_and_keeps_replacement_intent_after_edits(
     let ready = pitch.finish(pitch.generation, Vec::new(), &shared).unwrap();
     assert!(ready.replace);
     assert!(ready.force_rebuild);
-    let clip = ready.snapshot.project.audio_track(track).unwrap().clips()[0];
+    let clip = ready.snapshot.project.audio_track(track).unwrap().clips()[0].clone();
     assert_eq!(clip.frame_count, 64);
     assert_eq!(clip.pitch_semitones, 8.0);
 }

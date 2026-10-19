@@ -231,7 +231,7 @@ fn current_version_restores_forward_sources_and_all_taps_after_main_routing() {
         ids.push(id);
     }
     let bytes = encoded(&project);
-    assert_eq!(&bytes[8..12], &13_u32.to_le_bytes());
+    assert_eq!(&bytes[8..12], &16_u32.to_le_bytes());
     let mut loaded = read_project(bytes.as_slice()).unwrap();
     assert_eq!(encoded(&loaded), bytes);
     assert_eq!(loaded.audio_track(source).unwrap().name(), "Later source");
@@ -283,6 +283,7 @@ fn effect_tail_allowance_follows_sidechain_paths_and_the_selected_tap() {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -397,6 +398,7 @@ fn existing_processors_default_to_zero_latency_and_ordinary_processing() {
             frame: 0,
             bpm: 120.0,
             playing: true,
+            quality: sympoie::plugin::RenderQuality::Realtime,
         },
     );
     assert_eq!(output, [[0.25; 2]; 2]);

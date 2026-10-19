@@ -346,6 +346,7 @@ fn mixer_effect_tails_follow_bus_and_sidechain_dependency_paths() {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();

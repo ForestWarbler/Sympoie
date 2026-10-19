@@ -96,6 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 key: *key,
                 velocity: 76 + voice as u8 * 7,
                 channel: voice as u8,
+                slide_ticks: 0,
             });
         }
         for beat in 0..8 {
@@ -105,6 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 key: chord[0] - 12,
                 velocity: if beat % 2 == 0 { 98 } else { 73 },
                 channel: 0,
+                slide_ticks: 0,
             });
         }
     }
@@ -115,6 +117,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             start_tick: 0,
             length_ticks: 15_360,
             notes: chords,
+            name: None,
+            pitch_bend: Vec::new(),
         },
     )?;
     project.add_midi_clip(
@@ -124,6 +128,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             start_tick: 0,
             length_ticks: 15_360,
             notes: pulse,
+            name: None,
+            pitch_bend: Vec::new(),
         },
     )?;
 

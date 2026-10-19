@@ -194,6 +194,8 @@ struct Interaction {
     range_move: Option<RangeMove>,
     range_released: Option<(RangeMove, Pos2)>,
     menu_at: Option<(usize, u64)>,
+    /// The clip being renamed in place, by its stable id, and the text so far.
+    clip_rename: Option<(u64, String)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1438,6 +1440,10 @@ fn clips(
     actions: &mut Vec<Action>,
 ) {
     let color = theme::track_color(project, row.index);
+    // Command can be pressed or released mid-drag; whatever is held at the drop decides.
+    if let Some(drag) = &mut interaction.clip_drag {
+        drag.copy = drag.mode == ClipMode::Move && ui.input(|i| i.modifiers.command);
+    }
     let body = Rect::from_min_max(lane.min + vec2(0.0, 1.0), lane.max - vec2(0.0, 2.0));
     let selection = inputs
         .selection
@@ -1483,6 +1489,7 @@ fn clips(
         let rect = Rect::from_x_y_ranges(x0..=x1, body.y_range());
         let header = rect.with_max_y((rect.top() + CLIP_HEADER).min(rect.bottom()));
         let selected = inputs.selection.clip == Some(clip);
+        let uid = project.tracks()[row.index].clip_uids()[index];
 
         ui.interact(
             rect.intersect(lane),
@@ -1569,12 +1576,17 @@ fn clips(
             }
         }
         if editable {
+            let mut rename = false;
             response.context_menu(|ui| {
                 let reverse_selection = selection
                     .is_some_and(|range| start < range.end as f64 && end > range.start as f64)
                     && inputs.selection.has_audio(project);
-                clip_menu(ui, project, clip, reverse_selection, actions);
+                rename = clip_menu(ui, project, clip, reverse_selection, actions);
             });
+            if rename {
+                let current = edit::clip_name(project, clip).unwrap_or_default();
+                interaction.clip_rename = Some((uid, current.to_owned()));
+            }
         }
 
         if !ui.is_rect_visible(rect) {
@@ -1619,15 +1631,34 @@ fn clips(
         let visible_x = (x0.max(lane.left()))..=(x1.min(lane.right()));
         let text_rect =
             Rect::from_x_y_ranges((x0.max(lane.left()) + 4.0)..=(x1 - 3.0), header.y_range());
+        let renaming = interaction
+            .clip_rename
+            .as_ref()
+            .is_some_and(|(renamed, _)| *renamed == uid);
+        if renaming {
+            rename_clip_inline(ui, header.intersect(lane), clip, interaction, actions);
+        }
+        let fitted_label = |label: &str| {
+            if !renaming {
+                widgets::fitted_text(
+                    painter,
+                    text_rect,
+                    label,
+                    theme::prop(10.0),
+                    theme::TEXT_ON_COLOR,
+                    Align2::LEFT_CENTER,
+                );
+            }
+        };
         match &project.tracks()[row.index] {
             Track::Audio(track) => {
-                let audio = track.clips()[index];
+                let audio = &track.clips()[index];
                 if let Some((overview, buffer)) = waveforms.get(project, audio.asset) {
                     paint_waveform(
                         painter,
                         content,
                         visible_x,
-                        &audio,
+                        audio,
                         overview,
                         buffer,
                         timeline,
@@ -1635,35 +1666,22 @@ fn clips(
                         ink,
                     );
                 }
-                let mut label = track_title(&project.tracks()[row.index]);
+                let mut label = audio
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| track_title(&project.tracks()[row.index]));
                 if (audio.gain - 1.0).abs() > 1e-4 {
                     label = format!("{label}  {}", format::db(audio.gain));
                     if audio.gain < 0.0 {
                         label.push_str(" ø");
                     }
                 }
-                widgets::fitted_text(
-                    painter,
-                    text_rect,
-                    &label,
-                    theme::prop(10.0),
-                    theme::TEXT_ON_COLOR,
-                    Align2::LEFT_CENTER,
-                );
+                fitted_label(&label);
             }
             Track::Midi(track) => {
                 let midi = &track.clips()[index];
                 paint_notes(painter, content, midi, timeline, ink);
-                let count = midi.audible_notes().count();
-                let label = format!("{count} note{}", if count == 1 { "" } else { "s" });
-                widgets::fitted_text(
-                    painter,
-                    text_rect,
-                    &label,
-                    theme::prop(10.0),
-                    theme::TEXT_ON_COLOR,
-                    Align2::LEFT_CENTER,
-                );
+                fitted_label(&midi_clip_label(midi));
             }
             _ => {}
         }
@@ -1762,13 +1780,74 @@ fn group_summary(
     }
 }
 
+/// A MIDI clip's name, or how many notes it plays when it has none.
+pub(crate) fn midi_clip_label(clip: &MidiClip) -> String {
+    clip.name.clone().unwrap_or_else(|| {
+        let count = clip.audible_notes().count();
+        format!("{count} note{}", if count == 1 { "" } else { "s" })
+    })
+}
+
+fn rename_clip_inline(
+    ui: &mut Ui,
+    header: Rect,
+    clip: ClipRef,
+    interaction: &mut Interaction,
+    actions: &mut Vec<Action>,
+) {
+    let mut commit = None;
+    widgets::inside(
+        ui,
+        header.shrink2(vec2(2.0, 0.0)),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            if let Some((_, text)) = &mut interaction.clip_rename {
+                let edit = ui.add(
+                    egui::TextEdit::singleline(text)
+                        .id(Id::new("clip-rename"))
+                        .hint_text("Clip name")
+                        .font(theme::prop(10.0))
+                        .margin(vec2(3.0, 0.0))
+                        .desired_width(header.width() - 6.0),
+                );
+                if !edit.has_focus() && !edit.lost_focus() {
+                    edit.request_focus();
+                }
+                if edit.lost_focus() {
+                    // egui consumes the Escape that ends editing, so look at the raw input.
+                    let cancelled = ui.input(|i| {
+                        i.raw.events.iter().any(|event| {
+                            matches!(
+                                event,
+                                egui::Event::Key {
+                                    key: egui::Key::Escape,
+                                    pressed: true,
+                                    ..
+                                }
+                            )
+                        })
+                    });
+                    commit = Some((!cancelled).then(|| text.clone()));
+                }
+            }
+        },
+    );
+    if let Some(result) = commit {
+        if let Some(name) = result {
+            actions.push(Action::RenameClip { clip, name });
+        }
+        interaction.clip_rename = None;
+    }
+}
+
+/// Returns whether the user chose to rename the clip.
 fn clip_menu(
     ui: &mut Ui,
     project: &Project,
     clip: ClipRef,
     reverse_selection: bool,
     actions: &mut Vec<Action>,
-) {
+) -> bool {
     if edit::midi_clip(project, clip).is_some() {
         if ui.button("Edit Notes").clicked() {
             actions.push(Action::OpenPianoRoll(clip));
@@ -1777,6 +1856,7 @@ fn clip_menu(
         actions.push(Action::SelectClip(Some(clip)));
         actions.push(Action::ShowClipView);
     }
+    let rename = ui.button("Rename").clicked();
     ui.separator();
     if ui.button("Split").clicked() {
         actions.push(Action::SplitClip(clip));
@@ -1851,9 +1931,18 @@ fn clip_menu(
         }
     }
     ui.separator();
+    if edit::midi_clip(project, clip).is_some() {
+        if ui.button("Export MIDI File…").clicked() {
+            actions.push(Action::ExportClipMidi(clip));
+        }
+    } else if ui.button("Export Audio File…").clicked() {
+        actions.push(Action::ExportClipAudio(clip));
+    }
+    ui.separator();
     if ui.button("Delete").clicked() {
         actions.push(Action::DeleteClip(clip));
     }
+    rename
 }
 
 fn ghost(
@@ -2017,6 +2106,7 @@ fn paint_notes(
     timeline: &Timeline,
     color: Color32,
 ) {
+    paint_bend(painter, rect, clip, timeline, color);
     let notes: Vec<_> = clip.audible_notes().collect();
     let (Some(low), Some(high)) = (
         notes.iter().map(|note| note.key).min(),
@@ -2048,6 +2138,38 @@ fn paint_notes(
             color.gamma_multiply(alpha),
         );
     }
+}
+
+/// The clip's pitch bend as a faint line around the clip's middle.
+fn paint_bend(
+    painter: &egui::Painter,
+    rect: Rect,
+    clip: &MidiClip,
+    timeline: &Timeline,
+    color: Color32,
+) {
+    let points = clip.audible_bend();
+    if points.iter().all(|point| point.value == 0) {
+        return;
+    }
+    let half = rect.height() * 0.4;
+    let y = |value: i16| rect.center().y - sympoie::clip::bend_normalized(value) * half;
+    let x = |tick: u64| timeline.x((clip.start_tick + tick) as f64);
+    let end = x(clip.length_ticks);
+    let mut line = vec![pos2(x(0), y(points[0].value))];
+    line.extend(
+        points
+            .iter()
+            .map(|point| pos2(x(point.tick), y(point.value))),
+    );
+    line.push(pos2(end, y(points[points.len() - 1].value)));
+    for point in &mut line {
+        point.x = point.x.clamp(x(0), end);
+    }
+    painter.add(Shape::line(
+        line,
+        Stroke::new(1.0, color.gamma_multiply(0.45)),
+    ));
 }
 
 fn kind_name(track: &Track) -> &'static str {

@@ -40,8 +40,9 @@ fn fixture(
         pitch_semitones: 7.25,
         pitch_algorithm: algorithm,
         preserve_formants,
+        name: None,
     };
-    project.add_audio_clip(track, clip).unwrap();
+    project.add_audio_clip(track, clip.clone()).unwrap();
     (project, track, clip)
 }
 
@@ -71,7 +72,7 @@ fn native_pitch_split_and_trim_remain_exact_windows_of_the_processed_source() {
                         source_start: start,
                         start_tick: start,
                         frame_count: count,
-                        ..clip
+                        ..clip.clone()
                     },
                 )
                 .unwrap();
@@ -91,7 +92,7 @@ fn native_pitch_split_and_trim_remain_exact_windows_of_the_processed_source() {
                     source_start: 2777,
                     start_tick: 100,
                     frame_count: 5432,
-                    ..clip
+                    ..clip.clone()
                 },
             )
             .unwrap();
@@ -154,7 +155,7 @@ fn native_pitch_cache_distinguishes_engines_and_formants_and_pins_all_live_varia
                 AudioClip {
                     pitch_algorithm: algorithm,
                     preserve_formants,
-                    ..clip
+                    ..clip.clone()
                 },
             )
             .unwrap();

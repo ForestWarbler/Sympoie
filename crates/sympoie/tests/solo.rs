@@ -27,6 +27,7 @@ fn audio(project: &mut Project, value: f32) -> AudioTrackId {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -326,6 +327,7 @@ fn live_solo_preserves_delay_compensation_and_running_plugin_state() {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();

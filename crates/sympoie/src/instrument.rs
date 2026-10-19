@@ -106,16 +106,25 @@ impl Instrument {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum NoteEvent {
     On {
         id: u64,
         key: u8,
         velocity: u8,
         channel: u8,
+        /// Portamento time into this note from the previous pitch; 0 means no slide.
+        slide_frames: u32,
     },
     Off {
         id: u64,
+    },
+    /// Ramp the channel's bend linearly to `value` (-1..=1 of the bend range) over
+    /// `ramp_frames`; 0 jumps (instruments may still smooth it).
+    PitchBend {
+        channel: u8,
+        value: f32,
+        ramp_frames: u32,
     },
 }
 
@@ -234,11 +243,9 @@ impl InstrumentProcessor for SubtractiveProcessor {
 
     fn event(&mut self, event: NoteEvent) {
         match event {
+            NoteEvent::PitchBend { .. } => {}
             NoteEvent::On {
-                id,
-                key,
-                velocity,
-                channel: _,
+                id, key, velocity, ..
             } => {
                 let index = self
                     .voices
@@ -620,6 +627,7 @@ mod tests {
             key,
             velocity,
             channel: 0,
+            slide_frames: 0,
         });
     }
 

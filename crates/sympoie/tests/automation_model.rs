@@ -177,19 +177,19 @@ fn grouping_and_deleting_another_track_preserve_the_same_envelopes() {
     project.set_track_group(audio, Some(group)).unwrap();
     assert_eq!(
         project.audio_track(audio).unwrap().automation(),
-        &[lane(AutomationTarget::TrackGain)]
+        &[lane(AutomationTarget::TrackGain).with_anchor(Some(0.5))]
     );
     project.remove_track(removed).unwrap();
     assert_eq!(project.tracks()[1].name(), "Keep me");
     assert_eq!(
         project.tracks()[1].automation(),
-        &[lane(AutomationTarget::TrackGain)]
+        &[lane(AutomationTarget::TrackGain).with_anchor(Some(0.5))]
     );
     let id = project.track_ids().nth(1).unwrap();
     project.set_track_group(id, None).unwrap();
     assert_eq!(
         project.tracks()[1].automation(),
-        &[lane(AutomationTarget::TrackGain)]
+        &[lane(AutomationTarget::TrackGain).with_anchor(Some(0.5))]
     );
     let clone = project.clone();
     project
@@ -197,7 +197,7 @@ fn grouping_and_deleting_another_track_preserve_the_same_envelopes() {
         .unwrap();
     assert_eq!(
         clone.tracks()[1].automation(),
-        &[lane(AutomationTarget::TrackGain)]
+        &[lane(AutomationTarget::TrackGain).with_anchor(Some(0.5))]
     );
 }
 
@@ -320,7 +320,7 @@ fn version_eight_round_trips_every_target_and_disabled_lanes() {
             .unwrap();
     }
     let bytes = encoded(&project);
-    assert_eq!(&bytes[8..12], &13_u32.to_le_bytes());
+    assert_eq!(&bytes[8..12], &16_u32.to_le_bytes());
     let restored = read_project(bytes.as_slice()).unwrap();
     for (before, after) in project.tracks().iter().zip(restored.tracks()) {
         assert_eq!(before.automation(), after.automation());
@@ -370,7 +370,7 @@ fn malformed_automation_extensions_are_rejected() {
         .set_track_automation(project.master_track_id(), lane(AutomationTarget::TrackGain))
         .unwrap();
     let bytes = encoded(&project);
-    let start = bytes.len() - 8 - 50;
+    let start = bytes.len() - 8 - 58;
     for offset in start..bytes.len() {
         assert!(read_project(&bytes[..offset]).is_err());
     }
@@ -378,9 +378,9 @@ fn malformed_automation_extensions_are_rejected() {
         (start, u64::MAX.to_le_bytes().to_vec()),
         (start + 8, vec![255]),
         (start + 9, vec![2]),
-        (start + 10, u64::MAX.to_le_bytes().to_vec()),
-        (start + 26, f64::NAN.to_le_bytes().to_vec()),
-        (start + 34, 240_u64.to_le_bytes().to_vec()),
+        (start + 18, u64::MAX.to_le_bytes().to_vec()),
+        (start + 34, f64::NAN.to_le_bytes().to_vec()),
+        (start + 42, 240_u64.to_le_bytes().to_vec()),
     ] {
         let mut invalid = bytes.clone();
         invalid[offset..offset + replacement.len()].copy_from_slice(&replacement);
@@ -389,8 +389,8 @@ fn malformed_automation_extensions_are_rejected() {
     let mut duplicate = bytes.clone();
     duplicate[start..start + 8].copy_from_slice(&2_u64.to_le_bytes());
     duplicate.splice(
-        start + 50..start + 50,
-        bytes[start + 8..start + 50].iter().copied(),
+        start + 58..start + 58,
+        bytes[start + 8..start + 58].iter().copied(),
     );
     assert!(read_project(duplicate.as_slice()).is_err());
     let mut missing_instrument = bytes.clone();
@@ -432,6 +432,7 @@ fn automated_release_extends_export_duration() {
         key: 60,
         velocity: 100,
         channel: 0,
+        slide_ticks: 0,
     });
     project.add_midi_clip(midi, clip).unwrap();
     let before = project.duration_frames().unwrap();

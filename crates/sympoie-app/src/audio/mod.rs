@@ -1,3 +1,4 @@
+pub mod analog_render;
 pub mod analysis;
 pub mod bounce;
 pub mod engine;

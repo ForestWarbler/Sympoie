@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use sympoie::Frame;
-use sympoie::clip::{AudioClip, MidiClip, MidiNote};
+use sympoie::clip::{AudioClip, BendPoint, MidiClip, MidiNote, thin_bend};
 use sympoie::pitch::PitchAlgorithm;
 use sympoie::project::{AudioBuffer, Project};
 use sympoie::time::{SnapGrid, Tempo};
@@ -296,7 +296,7 @@ impl SympoieApp {
         let midi: BTreeMap<_, _> = take
             .midi
             .into_iter()
-            .map(|(track, performance)| (track, performance.finish(length, take.tempo)))
+            .map(|(track, performance)| (track, performance.finish_take(length, take.tempo)))
             .collect();
         let length_ticks = take.tempo.frames_to_ticks(length).unwrap_or(1).max(1);
         let captured = self.edit_structural("Record", move |project| {
@@ -325,7 +325,7 @@ fn commit_take(
     start: u64,
     length: u64,
     audio: BTreeMap<usize, Vec<Frame>>,
-    midi: BTreeMap<usize, Vec<MidiNote>>,
+    midi: BTreeMap<usize, (Vec<MidiNote>, Vec<BendPoint>)>,
 ) -> Result<Vec<ClipRef>, String> {
     let grid = project.snap_grid();
     project.set_snap_grid(SnapGrid::Off);
@@ -355,12 +355,13 @@ fn commit_take(
                         pitch_semitones: 0.0,
                         pitch_algorithm: PitchAlgorithm::Signalsmith,
                         preserve_formants: true,
+                        name: None,
                     },
                 )
                 .map_err(|e| e.to_string())?;
             clips.push(ClipRef { track, index });
         }
-        for (track, notes) in midi {
+        for (track, (notes, pitch_bend)) in midi {
             let id = edit::midi_id(project, track)?;
             let index = project
                 .midi_track(id)
@@ -381,6 +382,8 @@ fn commit_take(
                         length_ticks,
                         offset_ticks: 0,
                         notes,
+                        name: None,
+                        pitch_bend,
                     },
                 )
                 .map_err(|e| e.to_string())?;
@@ -398,6 +401,8 @@ struct MidiPerformance {
     held: BTreeMap<(usize, u8, u8), HeldNote>,
     sustain: BTreeSet<(usize, u8)>,
     notes: Vec<(u64, u64, u8, u8, u8)>,
+    /// Raw pitch bend as (frame offset, centred 14-bit value), merged across channels.
+    bends: Vec<(u64, i16)>,
 }
 
 struct HeldNote {
@@ -447,6 +452,10 @@ impl MidiPerformance {
                     self.end(identity, offset);
                 }
             }
+            0xe0 => {
+                let value = (i32::from(key) | i32::from(value) << 7) - 8192;
+                self.bends.push((offset, value as i16));
+            }
             0xb0 if key == 64 || key == 120 || key == 121 || key == 123 => {
                 if key == 64 && value >= 64 {
                     self.sustain.insert((source, channel));
@@ -471,6 +480,39 @@ impl MidiPerformance {
         }
     }
 
+    /// The take's notes plus its pitch bend, thinned to the points that shape the curve.
+    fn finish_take(mut self, end: u64, tempo: Tempo) -> (Vec<MidiNote>, Vec<BendPoint>) {
+        // Thin in frame time first: rounding dense wheel messages to ticks first would
+        // turn a smooth move into a staircase that thinning has to keep.
+        let mut frames: Vec<BendPoint> = Vec::new();
+        let mut bends = std::mem::take(&mut self.bends);
+        bends.sort_by_key(|(offset, _)| *offset);
+        for (offset, value) in bends.into_iter().filter(|(offset, _)| *offset < end) {
+            match frames.last_mut() {
+                Some(last) if last.tick == offset => last.value = value,
+                _ => frames.push(BendPoint {
+                    tick: offset,
+                    value,
+                }),
+            }
+        }
+        let mut bend: Vec<BendPoint> = Vec::new();
+        if frames.iter().any(|point| point.value != 0) {
+            // About 16 of the 8192 steps either side: inaudible, and recorded wheels are dense.
+            for point in thin_bend(&frames, 16.0) {
+                let tick = tempo.frames_to_ticks(point.tick).unwrap_or(0);
+                match bend.last_mut() {
+                    Some(last) if last.tick == tick => last.value = point.value,
+                    _ => bend.push(BendPoint {
+                        tick,
+                        value: point.value,
+                    }),
+                }
+            }
+        }
+        (self.finish(end, tempo), bend)
+    }
+
     fn finish(mut self, end: u64, tempo: Tempo) -> Vec<MidiNote> {
         let keys: Vec<_> = self.held.keys().copied().collect();
         for key in keys {
@@ -489,6 +531,7 @@ impl MidiPerformance {
                     key,
                     velocity,
                     channel,
+                    slide_ticks: 0,
                 }
             })
             .collect();

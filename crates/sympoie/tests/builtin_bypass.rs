@@ -15,6 +15,7 @@ fn note(duration_ticks: u64) -> MidiNote {
         key: 12,
         velocity: 127,
         channel: 0,
+        slide_ticks: 0,
     }
 }
 
@@ -44,6 +45,8 @@ fn fixture() -> (Project, MidiTrackId) {
                 start_tick: 0,
                 length_ticks: 4_000,
                 notes: vec![note(4_000)],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();

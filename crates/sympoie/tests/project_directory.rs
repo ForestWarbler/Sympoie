@@ -82,6 +82,7 @@ fn fixture() -> Project {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -104,7 +105,10 @@ fn fixture() -> Project {
                     key: 61,
                     velocity: 100,
                     channel: 3,
+                    slide_ticks: 0,
                 }],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -158,7 +162,7 @@ fn folder_and_manifest_round_trip_every_bit_and_preserve_muted_original_and_plug
         encoded(&original)
     );
     let manifest = fs::read(temp.0.join(PROJECT_MANIFEST)).unwrap();
-    assert_eq!(&manifest[8..12], &13_u32.to_le_bytes());
+    assert_eq!(&manifest[8..12], &16_u32.to_le_bytes());
     assert_eq!(manifest[37], 1);
     assert_eq!(sample_files(&temp.0).len(), 2);
     for sample in sample_files(&temp.0) {

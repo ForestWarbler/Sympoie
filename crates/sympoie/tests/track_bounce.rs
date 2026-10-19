@@ -33,6 +33,7 @@ fn audio(project: &mut Project, name: &str, start: u64, samples: Vec<Frame>) -> 
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -267,7 +268,10 @@ fn midi_bounce_includes_release_and_becomes_an_audio_track() {
                     key: 60,
                     velocity: 100,
                     channel: 0,
+                    slide_ticks: 0,
                 }],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -301,7 +305,10 @@ fn duplicate_preserves_source_instrument_and_mixer_but_mutes_it() {
                     key: 64,
                     velocity: 100,
                     channel: 0,
+                    slide_ticks: 0,
                 }],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -579,6 +586,7 @@ fn invalid_targets_lengths_and_changed_mixer_fail_without_editing() {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -717,6 +725,7 @@ fn midi_bounce_extent_follows_trimmed_visible_notes_and_ignores_hidden_notes() {
                         key: 60,
                         velocity: 100,
                         channel: 0,
+                        slide_ticks: 0,
                     },
                     MidiNote {
                         start_tick: 510,
@@ -724,6 +733,7 @@ fn midi_bounce_extent_follows_trimmed_visible_notes_and_ignores_hidden_notes() {
                         key: 62,
                         velocity: 100,
                         channel: 0,
+                        slide_ticks: 0,
                     },
                     MidiNote {
                         start_tick: u64::MAX - 1,
@@ -731,8 +741,11 @@ fn midi_bounce_extent_follows_trimmed_visible_notes_and_ignores_hidden_notes() {
                         key: 64,
                         velocity: 100,
                         channel: 0,
+                        slide_ticks: 0,
                     },
                 ],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();

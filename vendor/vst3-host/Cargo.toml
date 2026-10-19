@@ -153,6 +153,9 @@ version = "0.10"
 [target.'cfg(target_os = "macos")'.dependencies.objc2]
 version = "0.6"
 
+[target.'cfg(target_os = "macos")'.dependencies.block2]
+version = "0.6"
+
 [target.'cfg(target_os = "macos")'.dependencies.objc2-app-kit]
 version = "0.3.2"
 features = [
@@ -162,6 +165,8 @@ features = [
     "NSResponder",
     "NSGraphics",
     "NSEvent",
+    "NSText",
+    "block2",
 ]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-foundation]
@@ -171,6 +176,7 @@ features = [
     "NSGeometry",
     "NSDate",
     "NSRunLoop",
+    "NSArray",
 ]
 
 [target.'cfg(target_os = "windows")'.dependencies.winapi]

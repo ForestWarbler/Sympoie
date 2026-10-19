@@ -32,7 +32,10 @@ fn synth_project() -> (Project, u64) {
                     key: 57,
                     velocity: 100,
                     channel: 0,
+                    slide_ticks: 0,
                 }],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -201,7 +204,10 @@ fn one_shot_sample_export_includes_playback_after_short_midi_gate() {
                     key: 48,
                     velocity: 127,
                     channel: 0,
+                    slide_ticks: 0,
                 }],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();

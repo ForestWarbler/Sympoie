@@ -5,6 +5,7 @@ const CONTEXT: PluginProcessContext = PluginProcessContext {
     frame: 0,
     bpm: 120.0,
     playing: true,
+    quality: crate::plugin::RenderQuality::Realtime,
 };
 
 fn set(instance: &mut PluginInstance, id: u32, physical: f64) {
@@ -164,9 +165,18 @@ fn fft_reports_actual_post_eq_spectrum_without_stereo_cancellation() {
     assert!((meter(&telemetry.input_db) - decibels(0.4)).abs() < 0.1);
     assert!((meter(&telemetry.output_db) - (decibels(0.4) - 6.0)).abs() < 0.1);
     assert_eq!(meter(&telemetry.reduction_db), 0.0);
+    let updates = telemetry.spectrum_updates.load(Ordering::Relaxed);
+    assert!(updates > 0);
     processor.reset();
     assert_eq!(meter(&telemetry.output_db), -120.0);
-    assert!(telemetry.spectrum.iter().all(|bin| meter(bin) == -120.0));
+    // A loop wrap resets the device; the spectrum carries on rather than blanking.
+    assert!((meter(&telemetry.spectrum[bin]) - db).abs() < 1.0e-6);
+    let mut block = sine(frequency, 0.4, 2048);
+    processor.process(&mut block, CONTEXT);
+    assert_eq!(
+        telemetry.spectrum_updates.load(Ordering::Relaxed),
+        updates + 1
+    );
 }
 
 #[test]

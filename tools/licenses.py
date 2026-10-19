@@ -32,6 +32,10 @@ ALLOWED = [
     "GPL-2.0-or-later",
     "GPL-3.0-or-later",
     "LGPL-2.1-or-later",
+    # The deprecated SPDX name of LGPL-3.0-only, still used by some crates.
+    "LGPL-3.0",
+    "LGPL-3.0-only",
+    "LGPL-3.0-or-later",
 ]
 OWN = {
     "sympoie": [],

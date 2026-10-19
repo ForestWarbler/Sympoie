@@ -102,7 +102,7 @@ impl Item<'_> {
 
     fn is_instrument(&self) -> bool {
         match self {
-            Item::Builtin(kind) => matches!(kind, BuiltinKind::Oscil | BuiltinKind::Sampler),
+            Item::Builtin(kind) => kind.descriptor().kind == PluginKind::Instrument,
             Item::Plugin(plugin) => plugin.kind == PluginKind::Instrument,
         }
     }
@@ -709,11 +709,11 @@ mod tests {
         };
         assert_eq!(
             names(Category::Instruments, ""),
-            ["Oscil", "Sampler", "Bass Synth"]
+            ["Oscil", "Sampler", "Rain", "Ferro", "Bass Synth"]
         );
         assert_eq!(
             names(Category::AudioEffects, ""),
-            ["EQ", "Comp", "Comp", "Reverb"]
+            ["EQ", "Comp", "Vari-Mu", "Comp", "Reverb"]
         );
         assert_eq!(
             names(Category::Plugins, ""),

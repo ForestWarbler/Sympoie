@@ -43,6 +43,7 @@ fn audio_project() -> (Project, ClipRef) {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -69,8 +70,11 @@ fn midi_project() -> (Project, ClipRef) {
                         key: 67,
                         velocity: 91,
                         channel: 3,
+                        slide_ticks: 0,
                     })
                     .collect(),
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -81,7 +85,7 @@ fn midi_project() -> (Project, ClipRef) {
 fn copying_audio_preserves_original_source_and_gain_on_same_or_other_track() {
     for to_track in [1, 2] {
         let (mut project, source) = audio_project();
-        let original = *audio_clip(&project, source).unwrap();
+        let original = (audio_clip(&project, source).unwrap()).clone();
         let asset = project.shared_audio_asset(original.asset).unwrap();
         project.set_snap_grid(SnapGrid::Bar);
         let copied = copy_clip_to(&mut project, source, to_track, 1237).unwrap();

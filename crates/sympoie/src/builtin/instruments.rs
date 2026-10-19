@@ -651,7 +651,7 @@ impl Envelope {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Filter {
+pub(super) struct Filter {
     ic1: [f64; 2],
     ic2: [f64; 2],
     a1: f64,
@@ -661,7 +661,7 @@ struct Filter {
 }
 
 impl Filter {
-    const EMPTY: Self = Self {
+    pub(super) const EMPTY: Self = Self {
         ic1: [0.0; 2],
         ic2: [0.0; 2],
         a1: 1.0,
@@ -669,14 +669,14 @@ impl Filter {
         a3: 0.0,
         k: 1.0,
     };
-    fn coefficients(&mut self, hz: f64, q: f64) {
+    pub(super) fn coefficients(&mut self, hz: f64, q: f64) {
         let g = (PI * hz.clamp(10.0, 20000.0) / f64::from(SAMPLE_RATE)).tan();
         self.k = 1.0 / q.clamp(0.5, 12.0);
         self.a1 = 1.0 / (1.0 + g * (g + self.k));
         self.a2 = g * self.a1;
         self.a3 = g * self.a2;
     }
-    fn process(&mut self, input: [f64; 2], mode: u32) -> [f64; 2] {
+    pub(super) fn process(&mut self, input: [f64; 2], mode: u32) -> [f64; 2] {
         let mut weights = [0.0; 3];
         weights[(mode as usize).min(2)] = 1.0;
         self.process_blended(input, weights)
@@ -751,7 +751,7 @@ fn blamp(phase: f64, step: f64) -> f64 {
     }
 }
 
-fn oscillator(shape: u32, phase: f64, step: f64, width: f64) -> f64 {
+pub(super) fn oscillator(shape: u32, phase: f64, step: f64, width: f64) -> f64 {
     match shape {
         0 => (TAU * phase).sin(),
         1 => {
@@ -933,6 +933,7 @@ impl PluginProcessor for Oscil {
     }
     fn event(&mut self, event: NoteEvent) {
         match event {
+            NoteEvent::PitchBend { .. } => {}
             NoteEvent::On {
                 id, key, velocity, ..
             } => {

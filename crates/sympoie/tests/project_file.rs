@@ -40,15 +40,16 @@ fn fixture(midi_notes: bool) -> Project {
         pitch_semitones: 0.0,
         pitch_algorithm: Default::default(),
         preserve_formants: false,
+        name: None,
     };
-    project.add_audio_clip(audio, clip).unwrap();
+    project.add_audio_clip(audio, clip.clone()).unwrap();
     project
         .add_audio_clip(
             audio,
             AudioClip {
                 start_tick: 7,
                 gain: -0.0,
-                ..clip
+                ..clip.clone()
             },
         )
         .unwrap();
@@ -59,7 +60,7 @@ fn fixture(midi_notes: bool) -> Project {
                 source_start: 1,
                 frame_count: 1,
                 start_tick: 10,
-                ..clip
+                ..clip.clone()
             },
         )
         .unwrap();
@@ -78,6 +79,7 @@ fn fixture(midi_notes: bool) -> Project {
                             key: 127,
                             velocity: 1,
                             channel: 15,
+                            slide_ticks: 0,
                         },
                         MidiNote {
                             start_tick: 0,
@@ -85,8 +87,11 @@ fn fixture(midi_notes: bool) -> Project {
                             key: 60,
                             velocity: 127,
                             channel: 0,
+                            slide_ticks: 0,
                         },
                     ],
+                    name: None,
+                    pitch_bend: Vec::new(),
                 },
             )
             .unwrap();
@@ -264,10 +269,10 @@ fn rejects_bad_header_timing_strings_and_mixer_values() {
         );
     }
     let mut version = empty;
-    version[8..12].copy_from_slice(&14_u32.to_le_bytes());
+    version[8..12].copy_from_slice(&17_u32.to_le_bytes());
     assert!(matches!(
         read_project(version.as_slice()),
-        Err(ProjectFileError::UnsupportedVersion(14))
+        Err(ProjectFileError::UnsupportedVersion(17))
     ));
 }
 
@@ -381,6 +386,7 @@ fn rejects_nonfinite_audio_invalid_clip_asset_source_and_timeline_ranges() {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -420,7 +426,10 @@ fn rejects_invalid_midi_ranges_and_note_fields() {
                     key: 60,
                     velocity: 100,
                     channel: 0,
+                    slide_ticks: 0,
                 }],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -430,13 +439,15 @@ fn rejects_invalid_midi_ranges_and_note_fields() {
         (110, u64::MAX.to_le_bytes().to_vec()),
         (118, 0_u64.to_le_bytes().to_vec()),
         (126, u64::MAX.to_le_bytes().to_vec()),
+        // The clip name's length.
         (134, u64::MAX.to_le_bytes().to_vec()),
         (142, u64::MAX.to_le_bytes().to_vec()),
-        (150, 0_u64.to_le_bytes().to_vec()),
-        (158, vec![128]),
-        (159, vec![0]),
-        (159, vec![128]),
-        (160, vec![16]),
+        (150, u64::MAX.to_le_bytes().to_vec()),
+        (158, 0_u64.to_le_bytes().to_vec()),
+        (166, vec![128]),
+        (167, vec![0]),
+        (167, vec![128]),
+        (168, vec![16]),
     ] {
         let mut bytes = original.clone();
         bytes[offset..offset + replacement.len()].copy_from_slice(&replacement);
@@ -553,6 +564,7 @@ fn track_colours_and_hidden_midi_notes_round_trip() {
         key: 60,
         velocity: 90,
         channel: 0,
+        slide_ticks: 0,
     };
     let clip = MidiClip {
         start_tick: 3840,
@@ -565,6 +577,8 @@ fn track_colours_and_hidden_midi_notes_round_trip() {
                 ..note
             },
         ],
+        name: None,
+        pitch_bend: Vec::new(),
     };
     project.add_midi_clip(keys, clip.clone()).unwrap();
 

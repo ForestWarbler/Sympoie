@@ -8,7 +8,7 @@ use crate::clip::{MidiClip, MidiNote};
 use crate::instrument::{Instrument, InstrumentError, InstrumentProcessor, NoteEvent};
 use crate::plugin::{
     PluginHost, PluginInstance, PluginProcessContext, PluginProcessor, PluginSidechainInput,
-    SidechainRoute, SidechainTap,
+    RenderQuality, SidechainRoute, SidechainTap,
 };
 use crate::project::Project;
 use crate::time::{Tempo, TimeError};
@@ -335,7 +335,7 @@ impl RenderPlugin {
                                 parameter: *id,
                             }
                     })
-                    .and_then(|lane| lane.value_at(tick))
+                    .and_then(|lane| lane.trimmed_value_at(tick, *base))
             });
             let value = automated_value.unwrap_or(*base);
             if automated_value.is_some() {
@@ -428,7 +428,14 @@ impl RenderProcessor {
         }
     }
 
-    fn process(&mut self, output: &mut [Frame], frame: u64, bpm: f64, playing: bool) {
+    fn process(
+        &mut self,
+        output: &mut [Frame],
+        frame: u64,
+        bpm: f64,
+        playing: bool,
+        quality: RenderQuality,
+    ) {
         match self {
             Self::Builtin(processor) => processor.process(output),
             Self::Plugin(plugin) => plugin.process(
@@ -438,6 +445,7 @@ impl RenderProcessor {
                     frame,
                     bpm,
                     playing,
+                    quality,
                 },
                 None,
             ),
@@ -453,6 +461,11 @@ struct RenderInstrument {
     builtin_gain: SmoothedValue,
     notes: Vec<ScheduledNote>,
     events: Vec<TimedEvent>,
+    bends: Vec<BendCurve>,
+    quality: RenderQuality,
+    /// A finished offline render of this instrument's notes. While set, scheduled notes
+    /// play from it and the processor only serves live input and auditions.
+    cached: Option<Arc<[Frame]>>,
     next_event: usize,
     next_frame: Option<u64>,
     monitoring: bool,
@@ -492,8 +505,11 @@ impl RenderInstrument {
         } else {
             return Ok(None);
         };
-        let InstrumentSchedule { notes, events } =
-            InstrumentSchedule::new(project.tempo(), track.clips())?;
+        let InstrumentSchedule {
+            notes,
+            events,
+            bends,
+        } = InstrumentSchedule::new(project.tempo(), track.clips())?;
         Ok(Some(Self {
             processor,
             builtin_settings: track.instrument().copied(),
@@ -505,6 +521,9 @@ impl RenderInstrument {
             }),
             notes,
             events,
+            bends,
+            quality: RenderQuality::Realtime,
+            cached: None,
             next_event: 0,
             next_frame: None,
             monitoring: false,
@@ -536,7 +555,8 @@ impl RenderInstrument {
                     let Instrument::Subtractive(parameters) = &mut settings;
                     for lane in lanes {
                         if let AutomationTarget::Subtractive(parameter) = lane.target()
-                            && let Some(value) = lane.value_at(tick)
+                            && let Some(value) =
+                                lane.trimmed_value_at(tick, parameter.normalized_value(parameters))
                         {
                             parameter.set_normalized(parameters, value);
                             automated = true;
@@ -630,6 +650,7 @@ impl RenderInstrument {
                     key: note.key,
                     velocity: note.velocity,
                     channel: note.channel,
+                    slide_frames: 0,
                 },
                 remaining,
                 started: false,
@@ -669,6 +690,15 @@ impl RenderInstrument {
         }
         let channel = status & 15;
         let kind = status & 0xf0;
+        if kind == 0xe0 {
+            let raw = i32::from(key) | i32::from(velocity) << 7;
+            self.processor.event(NoteEvent::PitchBend {
+                channel,
+                value: crate::clip::bend_normalized((raw - 8192) as i16),
+                ramp_frames: 0,
+            });
+            return true;
+        }
         let note_on = kind == 0x90 && velocity != 0;
         let note_off = kind == 0x80 || kind == 0x90 && velocity == 0;
         let sustain = kind == 0xb0 && key == 64;
@@ -723,6 +753,7 @@ impl RenderInstrument {
                     key,
                     velocity,
                     channel,
+                    slide_frames: 0,
                 },
                 started: false,
                 key_down: true,
@@ -778,6 +809,7 @@ impl RenderInstrument {
                 },
                 bpm,
                 playing,
+                self.quality,
             );
             if matches!(self.processor, RenderProcessor::Builtin(_)) {
                 for sample in &mut output[written..written + count] {
@@ -827,6 +859,10 @@ impl RenderInstrument {
     }
 
     fn render(&mut self, start: u64, output: &mut [Frame], bpm: f64, start_auditions: bool) {
+        if let Some(cache) = self.cached.clone() {
+            self.render_cached(&cache, start, output, bpm, start_auditions);
+            return;
+        }
         if self.next_frame != Some(start) {
             if !self.monitoring {
                 self.processor.reset();
@@ -836,9 +872,42 @@ impl RenderInstrument {
                     self.audition_tail = 0;
                 }
             }
+            for bend in &self.bends {
+                let (value, ramp) = bend.at(start);
+                let channel = bend.channel;
+                self.processor.event(NoteEvent::PitchBend {
+                    channel,
+                    value,
+                    ramp_frames: 0,
+                });
+                if let Some((target, remaining)) = ramp {
+                    self.processor.event(NoteEvent::PitchBend {
+                        channel,
+                        value: target,
+                        ramp_frames: remaining,
+                    });
+                }
+            }
             for note in &self.notes {
                 if note.start < start && start < note.end {
-                    self.processor.event(note.on);
+                    // A chased note starts at its pitch; its slide is already over or cut.
+                    let on = match note.on {
+                        NoteEvent::On {
+                            id,
+                            key,
+                            velocity,
+                            channel,
+                            ..
+                        } => NoteEvent::On {
+                            id,
+                            key,
+                            velocity,
+                            channel,
+                            slide_frames: 0,
+                        },
+                        other => other,
+                    };
+                    self.processor.event(on);
                 }
             }
             self.next_event = self.events.partition_point(|event| event.frame < start);
@@ -876,6 +945,60 @@ impl RenderInstrument {
     }
 }
 
+impl RenderInstrument {
+    fn render_cached(
+        &mut self,
+        cache: &[Frame],
+        start: u64,
+        output: &mut [Frame],
+        bpm: f64,
+        start_auditions: bool,
+    ) {
+        if self.next_frame != Some(start) && !self.monitoring {
+            self.processor.reset();
+            self.auditions.retain(|note| !note.started);
+            self.live_notes.retain(|note| !note.started);
+            if self.auditions.is_empty() {
+                self.audition_tail = 0;
+            }
+        }
+        self.monitoring = false;
+        let end = start.saturating_add(output.len() as u64);
+        self.process(output, start, bpm, true, start_auditions);
+        let from = usize::try_from(start)
+            .unwrap_or(usize::MAX)
+            .min(cache.len());
+        let to = usize::try_from(end).unwrap_or(usize::MAX).min(cache.len());
+        for (frame, rendered) in output.iter_mut().zip(&cache[from..to]) {
+            frame[0] += rendered[0];
+            frame[1] += rendered[1];
+        }
+        self.next_event = self.events.partition_point(|event| event.frame < end);
+        self.next_frame = Some(end);
+    }
+
+    fn plugin_id(&self) -> Option<u64> {
+        match &self.processor {
+            RenderProcessor::Plugin(plugin) => Some(plugin.id),
+            RenderProcessor::Builtin(_) => None,
+        }
+    }
+
+    /// Switches between cached and live playback. A change forces the next block to
+    /// resynchronise, so live playback picks up the notes already sounding.
+    fn set_cached(&mut self, cached: Option<Arc<[Frame]>>) {
+        let same = match (&self.cached, &cached) {
+            (Some(old), Some(new)) => Arc::ptr_eq(old, new),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            self.cached = cached;
+            self.next_frame = None;
+        }
+    }
+}
+
 impl Drop for RenderInstrument {
     fn drop(&mut self) {
         self.release_auditions();
@@ -886,6 +1009,67 @@ impl Drop for RenderInstrument {
 struct InstrumentSchedule {
     notes: Vec<ScheduledNote>,
     events: Vec<TimedEvent>,
+    bends: Vec<BendCurve>,
+}
+
+/// A channel's pitch bend as a piecewise-linear curve in frames. Two points on the
+/// same frame are a jump. The curve holds its first and last values outside its points.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct BendCurve {
+    channel: u8,
+    points: Vec<(u64, f32)>,
+}
+
+impl BendCurve {
+    /// The bend at `frame` and, while ramping, the target and the frames left to reach it.
+    fn at(&self, frame: u64) -> (f32, Option<(f32, u32)>) {
+        let index = self.points.partition_point(|point| point.0 <= frame);
+        let Some(&(from_frame, from)) = index.checked_sub(1).map(|i| &self.points[i]) else {
+            return (0.0, None);
+        };
+        match self.points.get(index) {
+            Some(&(to_frame, to)) if to != from => {
+                let span = (to_frame - from_frame) as f64;
+                let t = (frame - from_frame) as f64 / span;
+                let value = from + (to - from) * t as f32;
+                let remaining = u32::try_from(to_frame - frame).unwrap_or(u32::MAX);
+                (value, Some((to, remaining)))
+            }
+            _ => (from, None),
+        }
+    }
+
+    fn events(&self, events: &mut Vec<TimedEvent>) {
+        let channel = self.channel;
+        let mut current = 0.0;
+        for (index, &(frame, value)) in self.points.iter().enumerate() {
+            if value != current {
+                events.push(TimedEvent {
+                    frame,
+                    event: NoteEvent::PitchBend {
+                        channel,
+                        value,
+                        ramp_frames: 0,
+                    },
+                });
+                current = value;
+            }
+            if let Some(&(next_frame, next)) = self.points.get(index + 1)
+                && next_frame > frame
+                && next != current
+            {
+                events.push(TimedEvent {
+                    frame,
+                    event: NoteEvent::PitchBend {
+                        channel,
+                        value: next,
+                        ramp_frames: u32::try_from(next_frame - frame).unwrap_or(u32::MAX),
+                    },
+                });
+                current = next;
+            }
+        }
+    }
 }
 
 impl InstrumentSchedule {
@@ -901,11 +1085,19 @@ impl InstrumentSchedule {
                     continue;
                 }
                 let id = notes.len() as u64;
+                let slide_frames = if note.slide_ticks == 0 {
+                    0
+                } else {
+                    let slide_end =
+                        tempo.ticks_to_frames(start_tick + u64::from(note.slide_ticks))?;
+                    u32::try_from(slide_end - start).unwrap_or(u32::MAX).max(1)
+                };
                 let on = NoteEvent::On {
                     id,
                     key: note.key,
                     velocity: note.velocity,
                     channel: note.channel,
+                    slide_frames,
                 };
                 notes.push(ScheduledNote { start, end, on });
                 events.push(TimedEvent {
@@ -918,12 +1110,57 @@ impl InstrumentSchedule {
                 });
             }
         }
+        let mut bends: Vec<BendCurve> = Vec::new();
+        for clip in clips {
+            let points = clip.audible_bend();
+            if points.is_empty() {
+                continue;
+            }
+            let clip_start = tempo.ticks_to_frames(clip.start_tick)?;
+            let clip_end = tempo.ticks_to_frames(clip.start_tick + clip.length_ticks)?;
+            let mut channels: Vec<u8> = clip.audible_notes().map(|note| note.channel).collect();
+            channels.sort_unstable();
+            channels.dedup();
+            if channels.is_empty() {
+                channels.push(0);
+            }
+            let mut curve = vec![(clip_start, points[0].normalized())];
+            for point in &points {
+                let frame = tempo.ticks_to_frames(clip.start_tick + point.tick)?;
+                curve.push((frame.min(clip_end), point.normalized()));
+            }
+            let last = curve.last().map_or(0.0, |point| point.1);
+            curve.push((clip_end, last));
+            curve.push((clip_end, 0.0));
+            for channel in channels {
+                let index = match bends.iter().position(|bend| bend.channel == channel) {
+                    Some(index) => index,
+                    None => {
+                        bends.push(BendCurve {
+                            channel,
+                            points: Vec::new(),
+                        });
+                        bends.len() - 1
+                    }
+                };
+                bends[index].points.extend_from_slice(&curve);
+            }
+        }
+        for bend in &mut bends {
+            bend.points.sort_by_key(|point| point.0);
+            bend.events(&mut events);
+        }
         notes.sort_by_key(|note| note.start);
         events.sort_by_key(|event| match event.event {
             NoteEvent::Off { id } => (event.frame, 0, id),
-            NoteEvent::On { id, .. } => (event.frame, 1, id),
+            NoteEvent::PitchBend { .. } => (event.frame, 1, 0),
+            NoteEvent::On { id, .. } => (event.frame, 2, id),
         });
-        Ok(Self { notes, events })
+        Ok(Self {
+            notes,
+            events,
+            bends,
+        })
     }
 }
 
@@ -953,11 +1190,46 @@ pub struct Renderer<'a> {
     loop_range: Option<(u64, u64)>,
     audition_output_remaining: u64,
     device_automation: bool,
+    quality: RenderQuality,
 }
 
 impl<'a> Renderer<'a> {
     pub fn new(project: &'a Project) -> Result<Self, RenderError> {
         Self::prepare(project, None)
+    }
+
+    /// Plays these finished offline renders, keyed by plugin instrument id, in place of
+    /// the instruments' scheduled notes. Instruments not listed play live.
+    pub fn set_instrument_renders(&mut self, renders: &[(u64, Arc<[Frame]>)]) {
+        for instrument in self
+            .order
+            .iter_mut()
+            .filter_map(|step| step.instrument.as_mut())
+        {
+            let cached = instrument.plugin_id().and_then(|id| {
+                renders
+                    .iter()
+                    .find(|(plugin, _)| *plugin == id)
+                    .map(|(_, frames)| Arc::clone(frames))
+            });
+            instrument.set_cached(cached);
+        }
+    }
+
+    /// Offline renders let devices use their slower, more accurate processing.
+    pub fn set_quality(&mut self, quality: RenderQuality) {
+        self.quality = quality;
+        for instrument in self
+            .order
+            .iter_mut()
+            .filter_map(|step| step.instrument.as_mut())
+        {
+            instrument.quality = quality;
+        }
+    }
+
+    pub fn quality(&self) -> RenderQuality {
+        self.quality
     }
 
     pub fn with_plugin_host(
@@ -1129,6 +1401,7 @@ impl<'a> Renderer<'a> {
             device_automation: tracks
                 .iter()
                 .any(|track| device_automation_active(track.automation())),
+            quality: RenderQuality::Realtime,
         };
         renderer.refresh_latency().map_err(RenderError::Plugin)?;
         Ok(renderer)
@@ -1177,6 +1450,7 @@ impl<'a> Renderer<'a> {
             instrument.begin_monitoring();
             instrument.notes = schedule.notes;
             instrument.events = schedule.events;
+            instrument.bends = schedule.bends;
             instrument.next_event = 0;
         }
         for (clips, track) in self.midi_clips.iter_mut().zip(edited.tracks()) {
@@ -1899,6 +2173,7 @@ impl<'a> Renderer<'a> {
                             frame: block_start,
                             bpm: self.project.tempo().bpm(),
                             playing,
+                            quality: self.quality,
                         },
                         if playing { self.loop_range } else { None },
                     );
@@ -1934,10 +2209,12 @@ impl<'a> Renderer<'a> {
                     );
                     let tick = position as f64 * ticks_per_frame;
                     let gain = gain_lane
-                        .and_then(|lane| lane.value_at(tick))
+                        .and_then(|lane| lane.trimmed_value_at(tick, f64::from(manual_gain) / 2.0))
                         .map_or(manual_gain, |value| value as f32 * 2.0 * mute);
                     let pan = pan_lane
-                        .and_then(|lane| lane.value_at(tick))
+                        .and_then(|lane| {
+                            lane.trimmed_value_at(tick, (f64::from(manual_pan) + 1.0) / 2.0)
+                        })
                         .map_or(manual_pan, |value| value as f32 * 2.0 - 1.0);
                     let balance = [1.0 - pan.max(0.0), 1.0 + pan.min(0.0)];
                     for (sample, balance) in input.iter_mut().zip(balance) {

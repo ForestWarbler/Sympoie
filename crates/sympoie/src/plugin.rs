@@ -185,6 +185,16 @@ pub struct PluginProcessContext {
     pub frame: u64,
     pub bpm: f64,
     pub playing: bool,
+    /// How hard the device may work. Offline renders (bounce, export, cached renders)
+    /// have no deadline, so devices may trade speed for accuracy.
+    pub quality: RenderQuality,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum RenderQuality {
+    #[default]
+    Realtime,
+    Offline,
 }
 
 #[derive(Debug, Clone, Copy)]

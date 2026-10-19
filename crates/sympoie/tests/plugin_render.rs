@@ -66,6 +66,7 @@ impl PluginProcessor for FakePlugin {
             NoteEvent::Off { id } => {
                 self.voices.remove(&id);
             }
+            NoteEvent::PitchBend { .. } => {}
         }
     }
 
@@ -143,6 +144,7 @@ fn audio_project() -> (Project, sympoie::track::AudioTrackId) {
                 pitch_semitones: 0.0,
                 pitch_algorithm: Default::default(),
                 preserve_formants: false,
+                name: None,
             },
         )
         .unwrap();
@@ -248,6 +250,7 @@ fn external_instrument_has_sample_accurate_overlapping_notes_and_effects() {
                         key: 60,
                         velocity: 100,
                         channel: 0,
+                        slide_ticks: 0,
                     },
                     MidiNote {
                         start_tick: 5,
@@ -255,8 +258,11 @@ fn external_instrument_has_sample_accurate_overlapping_notes_and_effects() {
                         key: 60,
                         velocity: 100,
                         channel: 0,
+                        slide_ticks: 0,
                     },
                 ],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -338,7 +344,10 @@ fn external_instrument_parameters_do_not_retrigger_held_notes() {
                     key: 60,
                     velocity: 100,
                     channel: 0,
+                    slide_ticks: 0,
                 }],
+                name: None,
+                pitch_bend: Vec::new(),
             },
         )
         .unwrap();
@@ -463,7 +472,7 @@ fn mixer_insert_updates_reuse_processors_and_automation_targets() {
 fn bus_solo_includes_its_inputs_and_track_solo_excludes_bus_siblings() {
     let (mut project, first) = audio_project();
     let second = project.add_audio_track("Second");
-    let clip = project.audio_track(first).unwrap().clips()[0];
+    let clip = project.audio_track(first).unwrap().clips()[0].clone();
     project.add_audio_clip(second, clip).unwrap();
     let bus = project.add_bus_track("Mix bus");
     project
@@ -604,7 +613,7 @@ fn send_gain_edits_ramp_independently_without_resetting_processors() {
 fn source_solo_keeps_its_returns_while_bus_solo_isolates_the_wet_return() {
     let (mut project, first) = audio_project();
     let second = project.add_audio_track("Second");
-    let clip = project.audio_track(first).unwrap().clips()[0];
+    let clip = project.audio_track(first).unwrap().clips()[0].clone();
     project.add_audio_clip(second, clip).unwrap();
     let bus = project.add_bus_track("Shared return");
     project.set_track_send(first, bus, 0.5).unwrap();

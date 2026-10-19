@@ -6,6 +6,22 @@ const BODY_HEIGHT: f32 = 172.0;
 
 const GAP: f32 = 4.0;
 
+#[path = "builtin_ferro.rs"]
+mod ferro;
+#[path = "builtin_rain.rs"]
+mod rain;
+#[path = "builtin_varimu.rs"]
+mod varimu;
+
+pub(super) fn scope(
+    ui: &mut Ui,
+    plugin: &PluginInstance,
+    telemetry: Option<&Telemetry>,
+    actions: &mut Vec<Action>,
+) {
+    varimu::scope(ui, plugin, telemetry, actions);
+}
+
 pub(super) fn show(
     ui: &mut Ui,
     plugin: &PluginInstance,
@@ -26,8 +42,14 @@ pub(super) fn show(
         BuiltinKind::Sampler => sampler(ui, &mut deck),
         BuiltinKind::Eq => eq(ui, &mut deck, telemetry),
         BuiltinKind::Comp => comp(ui, &mut deck, telemetry),
+        BuiltinKind::VariMu => varimu::compact(ui, &mut deck, telemetry),
+        BuiltinKind::Rain => rain::compact(ui, &mut deck, telemetry),
+        BuiltinKind::Ferro => ferro::compact(ui, &mut deck, telemetry),
     }
-    if matches!(kind, BuiltinKind::Eq | BuiltinKind::Comp) {
+    if matches!(
+        kind,
+        BuiltinKind::Eq | BuiltinKind::Comp | BuiltinKind::VariMu | BuiltinKind::Rain
+    ) {
         ui.ctx().request_repaint_after(Duration::from_millis(33));
     }
 }
@@ -827,6 +849,14 @@ pub(super) fn editor(
         accent: accent(kind),
         actions,
     };
+    if kind == BuiltinKind::VariMu {
+        varimu::editor(ui, &mut deck, telemetry);
+        return;
+    }
+    if kind == BuiltinKind::Ferro {
+        ferro::editor(ui, &mut deck, telemetry);
+        return;
+    }
     ui.spacing_mut().item_spacing = vec2(SECTION_GAP, SECTION_GAP);
     header(ui, &mut deck, kind);
     egui::ScrollArea::both()
@@ -839,6 +869,10 @@ pub(super) fn editor(
                 BuiltinKind::Sampler => sampler_editor(ui, &mut deck),
                 BuiltinKind::Eq => eq_editor(ui, &mut deck, telemetry),
                 BuiltinKind::Comp => comp_editor(ui, &mut deck, telemetry),
+                BuiltinKind::Rain => rain::editor(ui, &mut deck, telemetry),
+                BuiltinKind::VariMu | BuiltinKind::Ferro => {
+                    unreachable!("the Vari-Mu and Ferro draw their own faceplates")
+                }
             }
         });
 }
@@ -876,6 +910,9 @@ fn header(ui: &mut Ui, deck: &mut Deck, kind: BuiltinKind) {
                 BuiltinKind::Sampler => "Polyphonic sample instrument",
                 BuiltinKind::Eq => "Six-band equalizer",
                 BuiltinKind::Comp => "Compressor",
+                BuiltinKind::VariMu => "Variable-mu tube compressor",
+                BuiltinKind::Rain => "Random arpeggiator with a soft synth",
+                BuiltinKind::Ferro => "Analog synthesizer",
             };
             let (rect, _) = ui.allocate_exact_size(vec2(200.0, 10.0), Sense::hover());
             rack::print(
@@ -892,6 +929,8 @@ fn header(ui: &mut Ui, deck: &mut Deck, kind: BuiltinKind) {
                 BuiltinKind::Oscil | BuiltinKind::Sampler => &[(0, "Gain"), (1, "Pan"), (2, "Vel")],
                 BuiltinKind::Eq => &[(31, "Mix"), (30, "Output")],
                 BuiltinKind::Comp => &[(7, "Output"), (6, "Mix"), (5, "Makeup")],
+                BuiltinKind::VariMu | BuiltinKind::Ferro => &[],
+                BuiltinKind::Rain => &[(0, "Gain")],
             };
             for &(id, label) in output {
                 deck.knob(ui, id, label);
@@ -1261,7 +1300,8 @@ mod tests {
                 BuiltinKind::Oscil => 6,
                 BuiltinKind::Sampler => 3,
                 BuiltinKind::Eq => 6,
-                BuiltinKind::Comp => 1,
+                BuiltinKind::Rain => 3,
+                BuiltinKind::Comp | BuiltinKind::VariMu | BuiltinKind::Ferro => 1,
             };
             let mut reachable = std::collections::BTreeSet::new();
             for tab in 0..page_count {
@@ -1325,7 +1365,11 @@ mod tests {
                     }
                 }
             }
-            for spec in builtin::parameters(kind) {
+            // Devices with a full panel keep only their main controls on the card.
+            for spec in builtin::parameters(kind)
+                .into_iter()
+                .filter(|_| !has_panel(kind))
+            {
                 assert!(
                     reachable.contains(&spec.id),
                     "{} parameter {} has no inline control",

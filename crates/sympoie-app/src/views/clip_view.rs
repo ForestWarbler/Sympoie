@@ -92,7 +92,11 @@ fn properties(ui: &mut Ui, project: &Project, clip: ClipRef, actions: &mut Vec<A
     let track = &project.tracks()[clip.track];
     let color = theme::track_color(project, clip.track);
     ui.spacing_mut().item_spacing.y = 4.0;
-    box_title(ui, &track_label(project, clip.track), color);
+    let title = match edit::clip_name(project, clip) {
+        Some(name) => format!("{} · {name}", track_label(project, clip.track)),
+        None => track_label(project, clip.track),
+    };
+    box_title(ui, &title, color);
     egui::Frame::NONE
         .inner_margin(egui::Margin::symmetric(8, 4))
         .show(ui, |ui| {
@@ -117,7 +121,7 @@ fn properties(ui: &mut Ui, project: &Project, clip: ClipRef, actions: &mut Vec<A
 
     match track {
         Track::Audio(_) => {
-            let Some(audio) = edit::audio_clip(project, clip).copied() else {
+            let Some(audio) = edit::audio_clip(project, clip).cloned() else {
                 return;
             };
             box_title(ui, "Sample", theme::LOOP);
@@ -330,7 +334,7 @@ fn sample_display(
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, theme::LANE);
     let color = theme::track_color(project, clip.track);
-    let Some(audio) = edit::audio_clip(project, clip).copied() else {
+    let Some(audio) = edit::audio_clip(project, clip).cloned() else {
         if let Some(midi) = edit::midi_clip(project, clip) {
             painter.text(
                 rect.center(),
