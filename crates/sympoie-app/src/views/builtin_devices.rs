@@ -23,7 +23,7 @@ pub fn name(kind: BuiltinKind) -> &'static str {
 
 pub fn editor_size(kind: BuiltinKind) -> [f32; 2] {
     match kind {
-        BuiltinKind::Oscil => [700.0, 500.0],
+        BuiltinKind::Oscil => [700.0, 520.0],
         BuiltinKind::Sampler => [700.0, 410.0],
         BuiltinKind::Eq => [890.0, 450.0],
         BuiltinKind::Comp => [530.0, 330.0],

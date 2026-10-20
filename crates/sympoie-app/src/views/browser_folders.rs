@@ -183,11 +183,7 @@ fn read_entries(path: &Path) -> Result<Vec<FolderEntry>, String> {
 }
 
 pub fn is_audio_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("wav") || extension.eq_ignore_ascii_case("wave")
-        })
+    sympoie::audio_import::has_supported_extension(path)
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -373,11 +369,19 @@ mod tests {
     }
 
     #[test]
-    fn only_supported_wave_extensions_are_importable() {
-        for path in ["kick.wav", "SNARE.WAV", "loop.WaVe"] {
+    fn only_supported_audio_extensions_are_importable() {
+        for path in [
+            "kick.wav",
+            "SNARE.WAV",
+            "loop.WaVe",
+            "kick.mp3",
+            "loop.aiff",
+            "pad.AIF",
+            "loop.flac",
+        ] {
             assert!(is_audio_file(Path::new(path)), "{path}");
         }
-        for path in ["kick.mp3", "loop.aiff", "loop.flac", "wav", "kick.wav.txt"] {
+        for path in ["song.ogg", "loop.m4a", "wav", "kick.wav.txt"] {
             assert!(!is_audio_file(Path::new(path)), "{path}");
         }
     }

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -599,6 +599,20 @@ fn write_project_assets(
     Ok(())
 }
 
+/// Built-in choice parameters saved before their option list grew, keyed by
+/// `(plugin, parameter)`, so their automation can be rescaled like their stored values.
+#[derive(Default)]
+struct ChoiceUpgrades(HashMap<(u64, u32), (u32, u32)>);
+
+impl ChoiceUpgrades {
+    fn note(&mut self, plugin: PluginInstance) -> PluginInstance {
+        for (parameter, old, new) in crate::builtin::choice_upgrades(&plugin) {
+            self.0.insert((plugin.id, parameter), (old, new));
+        }
+        plugin
+    }
+}
+
 pub fn read_project(reader: impl Read) -> Result<Project, ProjectFileError> {
     read_project_with_base(reader, None)
 }
@@ -674,6 +688,7 @@ fn read_project_with_base(
         ));
     }
     let mut mixers = Vec::with_capacity(track_count);
+    let mut upgrades = ChoiceUpgrades::default();
     for index in 0..track_count {
         let kind = input.u8()?;
         if (index == 0) != (kind == 3) {
@@ -870,16 +885,16 @@ fn read_project_with_base(
                         "MIDI track has both a built-in and an external instrument",
                     ));
                 }
-                project.restore_plugin(id, input.plugin()?, true)?;
+                project.restore_plugin(id, upgrades.note(input.plugin()?), true)?;
             }
             let effects = input.count(58)?;
             for _ in 0..effects {
-                project.restore_plugin(id, input.plugin()?, false)?;
+                project.restore_plugin(id, upgrades.note(input.plugin()?), false)?;
             }
             if version >= 12 {
                 let inserts = input.count(58)?;
                 for _ in 0..inserts {
-                    project.restore_mixer_plugin(id, input.plugin()?)?;
+                    project.restore_mixer_plugin(id, upgrades.note(input.plugin()?))?;
                 }
             }
         }
@@ -979,6 +994,13 @@ fn read_project_with_base(
                         tick: input.u64()?,
                         value: input.f64()?,
                     });
+                }
+                if let AutomationTarget::PluginParameter { plugin, parameter } = target
+                    && let Some(&(old, new)) = upgrades.0.get(&(plugin, parameter))
+                {
+                    for point in &mut points {
+                        point.value = crate::builtin::upgrade_choice(point.value, old, new);
+                    }
                 }
                 project.set_track_automation(
                     *id,

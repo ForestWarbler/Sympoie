@@ -653,7 +653,7 @@ fn custom_folder_expansion_and_case_insensitive_filter_keep_directories_visible(
 }
 
 #[test]
-fn custom_wav_double_click_imports_to_audio_selection_or_a_new_track() {
+fn custom_audio_double_click_loads_the_selected_sampler_or_a_new_sampler_track() {
     let folder = TemporaryLibraryFolder::new();
     let audio = folder.file("Kick.WAV");
     let unsupported = folder.file("Readme.txt");
@@ -661,20 +661,43 @@ fn custom_wav_double_click_imports_to_audio_selection_or_a_new_track() {
     harness.state.add_folder(folder.0.clone()).unwrap();
     harness.settle();
 
-    for (selection, target) in [(vec![2], Some(2)), (vec![1], None), (vec![], None)] {
+    // Without a Sampler on the selected track, a new Sampler track is made.
+    for selection in [vec![2], vec![1], vec![], vec![1, 2]] {
         harness.selection.tracks = selection.into_iter().collect();
         harness.settle();
         harness.double_click(folder.file_id(&audio));
         assert_eq!(
             harness.actions,
-            [Action::ImportAudio {
-                paths: vec![audio.clone()],
-                track: target,
-                start: None,
+            [Action::LoadSampleIntoSampler {
+                path: audio.clone(),
+                track: None,
             }]
         );
         harness.actions.clear();
     }
+    let keys = harness.project.track_ids().nth(1).unwrap();
+    let sympoie::track::TrackId::Midi(keys) = keys else {
+        panic!("track 1 is the MIDI track")
+    };
+    harness
+        .project
+        .set_plugin_instrument(
+            keys,
+            Some(sympoie::builtin::BuiltinKind::Sampler.instance()),
+        )
+        .unwrap();
+    harness.selection.tracks = [1].into();
+    harness.settle();
+    harness.double_click(folder.file_id(&audio));
+    assert_eq!(
+        harness.actions,
+        [Action::LoadSampleIntoSampler {
+            path: audio.clone(),
+            track: Some(1),
+        }]
+    );
+    harness.actions.clear();
+
     harness.double_click(folder.file_id(&unsupported));
     assert!(harness.actions.is_empty());
     assert_eq!(harness.state.selected, Some(folder.file_id(&unsupported)));

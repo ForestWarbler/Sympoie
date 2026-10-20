@@ -266,7 +266,10 @@ const OSC_LEFT: f32 = 202.0;
 const OSC_RIGHT: f32 = 200.0;
 
 fn oscil(ui: &mut Ui, deck: &mut Deck) {
-    let selected = deck.pages(ui, &["Osc 1", "Osc 2", "Osc 3", "Mod env", "LFO", "Matrix"]);
+    let selected = deck.pages(
+        ui,
+        &["Osc 1", "Osc 2", "Osc 3", "Mod env", "LFOs", "Matrix"],
+    );
     if selected == 5 {
         matrix(ui, deck);
         return;
@@ -276,7 +279,7 @@ fn oscil(ui: &mut Ui, deck: &mut Deck) {
         column(ui, OSC_LEFT, |ui| match selected {
             0..=2 => {
                 let base = 100 + selected as u32 * 10;
-                deck.choose(ui, base, &sympoie::builtin::OSC_SHAPES, 74.0);
+                deck.choose(ui, base, &sympoie::builtin::OSCIL_SHAPES, 74.0);
                 let (rect, _) = ui.allocate_exact_size(vec2(OSC_LEFT, 38.0), Sense::hover());
                 let wave = (deck.value(base).round() as u32, deck.value(base + 5));
                 let silent = deck.value(base + 3) <= -59.9;
@@ -326,20 +329,8 @@ fn oscil(ui: &mut Ui, deck: &mut Deck) {
                 deck.knobs(ui, &[(23, "Amount"), (24, "Key trk"), (25, "Drive")]);
             }
             _ => {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    deck.choose(ui, 43, &sympoie::builtin::LFO_SHAPES, 74.0);
-                    deck.switch(ui, 44, "Retrig");
-                });
-                let (rect, _) = ui.allocate_exact_size(vec2(OSC_LEFT, 38.0), Sense::hover());
-                lfo_screen(
-                    ui,
-                    rect,
-                    deck.value(43).round() as u32,
-                    deck.value(40),
-                    deck.accent,
-                );
-                deck.knobs(ui, &[(40, "Rate"), (41, "Pitch"), (42, "Filter")]);
+                lfo_block(ui, deck, 0, OSC_LEFT);
+                lfo_block(ui, deck, 1, OSC_LEFT);
             }
         });
         divider(ui, 128.0);
@@ -393,6 +384,56 @@ fn oscil(ui: &mut Ui, deck: &mut Deck) {
     });
 }
 
+/// One LFO: a label, shape and retrigger on top; rate and depths beside a small preview.
+fn lfo_block(ui: &mut Ui, deck: &mut Deck, lfo: usize, width: f32) {
+    let base = sympoie::builtin::instruments::LFO_BASES[lfo];
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let (label, _) = ui.allocate_exact_size(vec2(36.0, rack::ROW), Sense::hover());
+        rack::print(
+            ui.painter(),
+            label.left_center(),
+            Align2::LEFT_CENTER,
+            &format!("LFO {}", lfo + 1),
+            rack::INK_FAINT,
+        );
+        deck.choose(ui, base + 3, &sympoie::builtin::LFO_SHAPES, 74.0);
+        deck.switch(ui, base + 4, "Retrig");
+    });
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        deck.knobs(
+            ui,
+            &[(base, "Rate"), (base + 1, "Pitch"), (base + 2, "Filter")],
+        );
+        let (rect, _) = ui.allocate_exact_size(
+            vec2(width - 3.0 * rack::KNOB_CELL.x, rack::KNOB_CELL.y),
+            Sense::hover(),
+        );
+        let silent =
+            deck.value(base + 1) == 0.0 && deck.value(base + 2) == 0.0 && !lfo_routed(deck, lfo);
+        lfo_screen(
+            ui,
+            Rect::from_min_max(rect.min + vec2(3.0, 8.0), rect.max - vec2(0.0, 6.0)),
+            deck.value(base + 3).round() as u32,
+            deck.value(base),
+            if silent { rack::INK_FAINT } else { deck.accent },
+        );
+    });
+}
+
+/// Whether any modulation matrix route uses the LFO as its source.
+fn lfo_routed(deck: &Deck, lfo: usize) -> bool {
+    use sympoie::builtin::instruments::{
+        MATRIX_AMOUNT, MATRIX_BASE, MATRIX_ROUTES, MATRIX_SOURCE, MATRIX_STRIDE,
+    };
+    (0..MATRIX_ROUTES as u32).any(|route| {
+        let base = MATRIX_BASE + route * MATRIX_STRIDE;
+        deck.value(base + MATRIX_SOURCE).round() as usize == 3 + lfo
+            && deck.value(base + MATRIX_AMOUNT) != 0.0
+    })
+}
+
 fn matrix(ui: &mut Ui, deck: &mut Deck) {
     use sympoie::builtin::instruments::{
         MATRIX_AMOUNT, MATRIX_BASE, MATRIX_ROUTES, MATRIX_SOURCE, MATRIX_SOURCE_LABELS,
@@ -432,7 +473,7 @@ fn matrix(ui: &mut Ui, deck: &mut Deck) {
                 deck.choose(ui, base + MATRIX_TARGET, &MATRIX_TARGET_LABELS, COLUMNS[2].1);
             let (depth, unit) = matrix_target_depth(target);
             target_response.on_hover_text(format!(
-                "Full depth: {depth} {unit}. Negative amount reverses modulation; the LFO spans both directions."
+                "Full depth: {depth} {unit}. Negative amount reverses modulation; LFOs span both directions."
             ));
             ui.push_id(("matrix-amount", deck.plugin.id, row), |ui| {
                 let mut percent = amount * 100.0;
@@ -454,7 +495,7 @@ fn matrix(ui: &mut Ui, deck: &mut Deck) {
             });
             let depth_text = if source == 0 {
                 "—".to_owned()
-            } else if source == 3 {
+            } else if source >= 3 {
                 format!("±{:.1} {unit}", depth * amount.abs())
             } else {
                 format!("{:+.1} {unit}", depth * amount)
@@ -469,32 +510,20 @@ fn matrix(ui: &mut Ui, deck: &mut Deck) {
                 Align2::LEFT_CENTER,
             );
             response.on_hover_text(format!(
-                "At 100%: {depth} {unit}. Envelopes range from 0 to 1; LFO ranges from −1 to +1. The target stays within its valid range."
+                "At 100%: {depth} {unit}. Envelopes range from 0 to 1; LFOs range from −1 to +1. The target stays within its valid range."
             ));
         });
     }
 }
 
-fn wave_screen(ui: &Ui, rect: Rect, shape: u32, pulse: f64, color: Color32) {
+fn wave_screen(ui: &Ui, rect: Rect, shape: u32, width: f64, color: Color32) {
     let painter = ui.painter();
     let inner = rack::screen(painter, rect);
     painter.hline(inner.x_range(), inner.center().y, rack::graticule());
     let points = (0..=160)
         .map(|index| {
             let x = f64::from(index) / 160.0;
-            let phase = (x * 2.0).fract();
-            let y = match shape {
-                1 => 1.0 - 4.0 * (phase - 0.5).abs(),
-                2 => phase * 2.0 - 1.0,
-                3 => {
-                    if phase < pulse {
-                        1.0
-                    } else {
-                        -1.0
-                    }
-                }
-                _ => (x * 4.0 * std::f64::consts::PI).sin(),
-            };
+            let y = sympoie::builtin::instruments::wave_shape(shape, x * 2.0, width);
             pos2(
                 inner.left() + 4.0 + x as f32 * (inner.width() - 8.0),
                 inner.center().y - y as f32 * (inner.height() / 2.0 - 5.0),
@@ -1017,7 +1046,7 @@ fn oscil_editor(ui: &mut Ui, deck: &mut Deck) {
             let base = 100 + 10 * index;
             ui.push_id(("oscillator", index), |ui| {
                 section(ui, &format!("Oscillator {}", index + 1), SECTION, |ui| {
-                    deck.choose(ui, base, &sympoie::builtin::OSC_SHAPES, 80.0);
+                    deck.choose(ui, base, &sympoie::builtin::OSCIL_SHAPES, 80.0);
                     let (rect, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
                     let silent = deck.value(base + 3) <= -59.9;
                     wave_screen(
@@ -1061,21 +1090,10 @@ fn oscil_editor(ui: &mut Ui, deck: &mut Deck) {
         section(ui, "Amp envelope", SECTION, |ui| envelope_row(ui, deck, 10));
     });
     ui.horizontal_top(|ui| {
-        section(ui, "LFO", SECTION, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                deck.choose(ui, 43, &sympoie::builtin::LFO_SHAPES, 80.0);
-                deck.switch(ui, 44, "Retrig");
-            });
-            let (rect, _) = ui.allocate_exact_size(vec2(width, 34.0), Sense::hover());
-            lfo_screen(
-                ui,
-                rect,
-                deck.value(43).round() as u32,
-                deck.value(40),
-                deck.accent,
-            );
-            deck.knobs(ui, &[(40, "Rate"), (41, "→ Pitch"), (42, "→ Filter")]);
+        section(ui, "LFOs", SECTION, |ui| {
+            lfo_block(ui, deck, 0, width);
+            ui.add_space(4.0);
+            lfo_block(ui, deck, 1, width);
         });
         section(ui, "Modulation matrix", 2.0 * SECTION + SECTION_GAP, |ui| {
             matrix(ui, deck)
@@ -1126,7 +1144,10 @@ fn sample_bar(ui: &mut Ui, deck: &mut Deck, loaded: &Result<Arc<SamplePreview>, 
             Id::new(("sampler-inline-load", deck.plugin.id)),
             Sense::hover(),
         );
-        if response.on_hover_text("Load a WAV sample").clicked() {
+        if response
+            .on_hover_text("Load a sample (WAV, AIFF, FLAC or MP3)")
+            .clicked()
+        {
             deck.actions
                 .push(Action::LoadSamplerSample { id: deck.plugin.id });
         }
@@ -1143,7 +1164,7 @@ fn sample_bar(ui: &mut Ui, deck: &mut Deck, loaded: &Result<Arc<SamplePreview>, 
                 ),
             ),
             Err(_) if deck.plugin.state.is_empty() => {
-                ("No sample — load a WAV".to_owned(), String::new())
+                ("No sample — load an audio file".to_owned(), String::new())
             }
             Err(error) => (error.clone(), String::new()),
         };

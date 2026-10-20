@@ -819,6 +819,14 @@ fn file_name(path: &Path) -> String {
     )
 }
 
+/// Every extension Sympoie imports, in both cases for case-sensitive dialogs.
+fn audio_dialog_extensions() -> Vec<String> {
+    sympoie::audio_import::EXTENSIONS
+        .iter()
+        .flat_map(|extension| [extension.to_string(), extension.to_uppercase()])
+        .collect()
+}
+
 fn has_extension(path: &Path, extension: &str) -> bool {
     path.extension()
         .is_some_and(|found| found.eq_ignore_ascii_case(extension))

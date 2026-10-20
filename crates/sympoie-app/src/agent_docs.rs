@@ -300,7 +300,7 @@ or track name; leave it out for the default label.
   `_`) and add its path to `tracks` in `project.json`. To remove one, take
   it out of the list.
 - Don't edit `samples/`, `state/` or `.sympoie/`. A WAV you put in
-  `samples/` (48 kHz stereo) can be used by an audio clip.
+  `samples/` can be used by an audio clip; it's converted to 48 kHz stereo.
 - After editing, call `check_project`, then `analyze_audio` on what you
   changed. If the person has unsaved edits when your change arrives,
   Sympoie asks them which version to keep.

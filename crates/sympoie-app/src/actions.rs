@@ -244,6 +244,12 @@ pub enum Action {
     LoadSamplerSample {
         id: u64,
     },
+    /// Loads an audio file into the Sampler on `track`, or onto a new MIDI track with a
+    /// Sampler when no Sampler track is given.
+    LoadSampleIntoSampler {
+        path: PathBuf,
+        track: Option<usize>,
+    },
     ResetBuiltinParameters {
         id: u64,
     },

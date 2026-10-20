@@ -94,7 +94,7 @@ fn oscillator_shapes_are_bounded_and_pulse_width_changes_duty_cycle() {
             for i in 0..1000 {
                 let sample = oscillator(shape, i as f64 / 1000.0, step, 0.13);
                 assert!(
-                    sample.is_finite() && sample.abs() <= if shape == 3 { 2.01 } else { 1.01 },
+                    sample.is_finite() && sample.abs() <= if shape == 3 { 2.01 } else { 1.6 },
                     "shape {shape}: {sample}"
                 );
             }
@@ -110,6 +110,99 @@ fn oscillator_shapes_are_bounded_and_pulse_width_changes_duty_cycle() {
     assert!(average(0.75).abs() < 0.001);
     assert!((oscillator(3, 0.1, 0.001, 0.25) - 1.5).abs() < 0.001);
     assert!((oscillator(3, 0.9, 0.001, 0.75) + 1.5).abs() < 0.001);
+}
+
+#[test]
+fn centred_width_keeps_the_classic_shapes_and_others_skew_without_dc() {
+    let step = 0.003;
+    for i in 0..1000 {
+        let phase = i as f64 / 1000.0;
+        let triangle = 1.0 - 4.0 * (phase - 0.5).abs()
+            + 4.0 * step * (blamp(phase, step) - blamp((phase + 0.5).fract(), step));
+        assert!((oscillator(0, phase, step, 0.5) - (TAU * phase).sin()).abs() < 1e-12);
+        assert!((oscillator(1, phase, step, 0.5) - triangle).abs() < 1e-12);
+        assert!(
+            (oscillator(2, phase, step, 0.5) - (2.0 * phase - 1.0 - blep(phase, step))).abs()
+                < 1e-12
+        );
+    }
+    for shape in 0..3 {
+        for width in [0.1, 0.3, 0.8] {
+            let mean = (0..20000)
+                .map(|i| oscillator(shape, i as f64 / 20000.0, 0.0001, width))
+                .sum::<f64>()
+                / 20000.0;
+            assert!(mean.abs() < 0.002, "shape {shape} width {width}: {mean}");
+        }
+    }
+    // The positive lobe of a skewed sine and the rise of a skewed triangle last `width`.
+    let ideal = |shape, phase| wave_shape(shape, phase, 0.2);
+    assert!(ideal(0, 0.19) > 0.0 && ideal(0, 0.21) < 0.0);
+    assert!((ideal(1, 0.2) - 1.0).abs() < 1e-9);
+    assert!(ideal(1, 0.1) < ideal(1, 0.2) && ideal(1, 0.6) < ideal(1, 0.2));
+}
+
+#[test]
+fn noise_oscillator_is_unpitched_and_differs_per_voice() {
+    let mut instance = BuiltinKind::Oscil.instance();
+    set(&mut instance, OSC_BASE + OSC_SHAPE, f64::from(NOISE_SHAPE));
+    set(&mut instance, FILTER_CUTOFF, 20000.0);
+    set(&mut instance, ATTACK, 0.0001);
+    set(&mut instance, SUSTAIN, 1.0);
+    let render = |key| {
+        let mut synth = Oscil::new(&instance);
+        synth.event(on(1, key));
+        let mut audio = [[0.0; 2]; 4000];
+        synth.process(&mut audio, context());
+        audio
+    };
+    let low = render(30);
+    let high = render(120);
+    let energy = |audio: &[[f32; 2]]| audio.iter().map(|f| f64::from(f[0]).powi(2)).sum::<f64>();
+    assert!(energy(&low[500..]) > 1.0);
+    // A pitch far past Nyquist mutes tonal shapes but not noise.
+    assert!((energy(&high[500..]) / energy(&low[500..]) - 1.0).abs() < 0.2);
+    let crossings = low
+        .windows(2)
+        .filter(|w| (w[0][0] < 0.0) != (w[1][0] < 0.0))
+        .count();
+    assert!(crossings > 1000, "{crossings}");
+
+    let mut synth = Oscil::new(&instance);
+    synth.event(on(1, 60));
+    synth.event(on(2, 60));
+    synth.process(&mut [[0.0; 2]; 1], context());
+    assert_ne!(synth.voices[0].noise, synth.voices[1].noise);
+}
+
+#[test]
+fn second_lfo_modulates_pitch_on_its_own_and_through_the_matrix() {
+    let mut instance = BuiltinKind::Oscil.instance();
+    set(&mut instance, LFO2_RATE, 8.0);
+    set(&mut instance, LFO2_SHAPE, 2.0);
+    set(&mut instance, LFO2_PITCH, 1200.0);
+    let mut synth = Oscil::new(&instance);
+    synth.event(on(1, 60));
+    synth.process(&mut [[0.0; 2]; 100], context());
+    let before = synth.voices[0].phases[0];
+    synth.process(&mut [[0.0; 2]; 1], context());
+    let step = (synth.voices[0].phases[0] - before).rem_euclid(1.0);
+    let base = note_hz(60) / f64::from(SAMPLE_RATE);
+    assert!((step / base - 2.0).abs() < 1e-6, "{}", step / base);
+    assert!((synth.lfo_phases[1] - 101.0 * 8.0 / f64::from(SAMPLE_RATE)).abs() < 1e-9);
+
+    set(&mut instance, LFO2_PITCH, 0.0);
+    set_route(&mut instance, 0, 4, 14, 1.0);
+    let synth = Oscil::new(&instance);
+    let contribution = matrix_displacements(
+        &synth.params,
+        &synth.matrix_sources,
+        &synth.matrix_targets,
+        0.25,
+        0.75,
+        [0.1, -0.5],
+    );
+    assert_eq!(contribution[14], -4.0);
 }
 
 #[test]
@@ -257,10 +350,10 @@ fn waveform_filter_and_lfo_switches_preserve_first_sample_and_finish_crossfade()
         match id {
             100 | 110 | 120 => assert_eq!(
                 switched.oscillator_shapes[((id - 100) / 10) as usize].weights,
-                [1.0, 0.0, 0.0, 0.0]
+                [1.0, 0.0, 0.0, 0.0, 0.0]
             ),
             FILTER_TYPE => assert_eq!(switched.filter_mode.weights, [0.0, 1.0, 0.0]),
-            LFO_SHAPE => assert_eq!(switched.lfo_shape.weights, [0.0, 1.0, 0.0]),
+            LFO_SHAPE => assert_eq!(switched.lfo_shapes[0].weights, [0.0, 1.0, 0.0]),
             _ => unreachable!(),
         }
         assert_eq!(switched.voices[0].id, 1);
@@ -426,7 +519,7 @@ fn matrix_envelopes_are_per_voice_and_depth_is_bipolar() {
             &synth.matrix_targets,
             0.25,
             0.75,
-            -0.5,
+            [-0.5, 0.3],
         );
         assert_eq!(contribution[14], -4.0 * amount);
     }

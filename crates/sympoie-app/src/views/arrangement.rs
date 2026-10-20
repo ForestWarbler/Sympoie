@@ -3065,7 +3065,7 @@ fn empty_state(ui: &mut Ui, area: Rect, actions: &mut Vec<Action>) {
     ui.painter_at(area).text(
         block.center_top() + vec2(0.0, 30.0),
         Align2::CENTER_TOP,
-        "48 kHz stereo PCM16 or float32 WAV files",
+        "WAV, AIFF, FLAC or MP3 files",
         theme::prop(10.5),
         theme::TEXT_FAINT,
     );

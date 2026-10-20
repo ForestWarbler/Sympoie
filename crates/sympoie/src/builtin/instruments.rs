@@ -34,6 +34,13 @@ pub const LFO_PITCH: u32 = 41;
 pub const LFO_FILTER: u32 = 42;
 pub const LFO_SHAPE: u32 = 43;
 pub const LFO_RETRIGGER: u32 = 44;
+pub const LFO2_RATE: u32 = 50;
+pub const LFO2_PITCH: u32 = 51;
+pub const LFO2_FILTER: u32 = 52;
+pub const LFO2_SHAPE: u32 = 53;
+pub const LFO2_RETRIGGER: u32 = 54;
+/// First parameter of each LFO; rate, pitch, filter, shape and retrigger follow in order.
+pub const LFO_BASES: [u32; 2] = [LFO_RATE, LFO2_RATE];
 pub const OSC_BASE: u32 = 100;
 pub const OSC_STRIDE: u32 = 10;
 pub const OSC_SHAPE: u32 = 0;
@@ -42,6 +49,8 @@ pub const OSC_FINE: u32 = 2;
 pub const OSC_LEVEL: u32 = 3;
 pub const OSC_PAN: u32 = 4;
 pub const OSC_PULSE_WIDTH: u32 = 5;
+/// Oscillator shape index of white noise, which ignores pitch and width.
+pub const NOISE_SHAPE: u32 = 4;
 
 pub const MATRIX_BASE: u32 = 200;
 pub const MATRIX_STRIDE: u32 = 3;
@@ -49,7 +58,7 @@ pub const MATRIX_ROUTES: usize = 6;
 pub const MATRIX_SOURCE: u32 = 0;
 pub const MATRIX_TARGET: u32 = 1;
 pub const MATRIX_AMOUNT: u32 = 2;
-pub const MATRIX_SOURCE_LABELS: [&str; 4] = ["Off", "Amp Env", "Mod Env", "LFO"];
+pub const MATRIX_SOURCE_LABELS: [&str; 5] = ["Off", "Amp Env", "Mod Env", "LFO 1", "LFO 2"];
 pub const MATRIX_TARGET_LABELS: [&str; 17] = [
     "All pitch",
     "Osc 1 pitch",
@@ -247,6 +256,46 @@ pub fn oscil_parameters() -> Vec<ParameterSpec> {
             Scale::Linear,
             1,
         ),
+        spec(
+            LFO2_RATE,
+            "LFO 2 rate",
+            "Hz",
+            [0.02, 30.0, 0.5],
+            Scale::Log,
+            0,
+        ),
+        spec(
+            LFO2_PITCH,
+            "LFO 2 pitch",
+            "cent",
+            [0.0, 1200.0, 0.0],
+            Scale::Linear,
+            0,
+        ),
+        spec(
+            LFO2_FILTER,
+            "LFO 2 filter",
+            "oct",
+            [0.0, 6.0, 0.0],
+            Scale::Linear,
+            0,
+        ),
+        spec(
+            LFO2_SHAPE,
+            "LFO 2 shape",
+            "",
+            [0.0, 2.0, 0.0],
+            Scale::Linear,
+            2,
+        ),
+        spec(
+            LFO2_RETRIGGER,
+            "LFO 2 retrigger",
+            "",
+            [0.0, 1.0, 0.0],
+            Scale::Linear,
+            1,
+        ),
     ]);
     const NAMES: [[&str; 6]; 3] = [
         [
@@ -277,7 +326,7 @@ pub fn oscil_parameters() -> Vec<ParameterSpec> {
     for (osc, names) in NAMES.iter().enumerate() {
         let id = OSC_BASE + osc as u32 * OSC_STRIDE;
         result.extend([
-            spec(id, names[0], "", [0.0, 3.0, 2.0], Scale::Linear, 3),
+            spec(id, names[0], "", [0.0, 4.0, 2.0], Scale::Linear, 4),
             spec(
                 id + 1,
                 names[1],
@@ -321,9 +370,9 @@ pub fn oscil_parameters() -> Vec<ParameterSpec> {
                 id + MATRIX_SOURCE,
                 names[0],
                 "",
-                [0.0, 3.0, 0.0],
+                [0.0, 4.0, 0.0],
                 Scale::Linear,
-                3,
+                4,
             ),
             spec(
                 id + MATRIX_TARGET,
@@ -751,22 +800,81 @@ fn blamp(phase: f64, step: f64) -> f64 {
     }
 }
 
-pub(super) fn oscillator(shape: u32, phase: f64, step: f64, width: f64) -> f64 {
+/// Maps the phase so the first half of a cycle lasts `width` and the second half the rest.
+fn skew(phase: f64, width: f64) -> f64 {
+    if phase < width {
+        0.5 * phase / width
+    } else {
+        0.5 + 0.5 * (phase - width) / (1.0 - width)
+    }
+}
+
+/// The ideal, unfiltered shape for drawing: width sets how much of the cycle the first half
+/// takes (the positive lobe of sine and pulse, the rise of triangle, the lower ramp of saw).
+pub fn wave_shape(shape: u32, phase: f64, width: f64) -> f64 {
+    let phase = phase.rem_euclid(1.0);
+    let warped = skew(phase, width.clamp(0.01, 0.99));
     match shape {
-        0 => (TAU * phase).sin(),
-        1 => {
-            1.0 - 4.0 * (phase - 0.5).abs()
-                + 4.0 * step * (blamp(phase, step) - blamp((phase + 0.5).fract(), step))
+        0 => (TAU * warped).sin(),
+        1 => 1.0 - 4.0 * (warped - 0.5).abs(),
+        2 => 2.0 * warped - 1.0,
+        3 => {
+            if warped < 0.5 {
+                1.0
+            } else {
+                -1.0
+            }
         }
-        2 => 2.0 * phase - 1.0 - blep(phase, step),
         _ => {
-            let width = width.clamp(step, 1.0 - step);
-            let raw = if phase < width { 1.0 } else { -1.0 };
-            raw + blep(phase, step)
-                - blep((phase - width).rem_euclid(1.0), step)
-                - (2.0 * width - 1.0)
+            let mut hash = ((phase * 4096.0) as u32).wrapping_mul(0x9E37_79B9);
+            hash ^= hash >> 15;
+            hash = hash.wrapping_mul(0x85EB_CA6B);
+            hash ^= hash >> 13;
+            f64::from(hash) / f64::from(u32::MAX) * 2.0 - 1.0
         }
     }
+}
+
+/// Band-limited, DC-free oscillator. Noise is drawn by the voice, so it returns silence here.
+pub(super) fn oscillator(shape: u32, phase: f64, step: f64, width: f64) -> f64 {
+    let width = width.clamp(step, 1.0 - step);
+    let to_width = (phase - width).rem_euclid(1.0);
+    let warped = skew(phase, width);
+    match shape {
+        0 => {
+            let kink = PI / width - PI / (1.0 - width);
+            (TAU * warped).sin() - (2.0 * width - 1.0) * 2.0 / PI
+                + 0.5 * kink * step * (blamp(phase, step) + blamp(to_width, step))
+        }
+        1 => {
+            let kink = 2.0 / width + 2.0 / (1.0 - width);
+            1.0 - 4.0 * (warped - 0.5).abs()
+                + 0.5 * kink * step * (blamp(phase, step) - blamp(to_width, step))
+        }
+        2 => {
+            let kink = 1.0 / width - 1.0 / (1.0 - width);
+            2.0 * warped - 1.0 - blep(phase, step) + width - 0.5
+                + 0.5 * kink * step * (blamp(phase, step) - blamp(to_width, step))
+        }
+        3 => {
+            let raw = if phase < width { 1.0 } else { -1.0 };
+            raw + blep(phase, step) - blep(to_width, step) - (2.0 * width - 1.0)
+        }
+        _ => 0.0,
+    }
+}
+
+fn white_noise(state: &mut u32) -> f64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 17;
+    *state ^= *state << 5;
+    f64::from(*state) / f64::from(u32::MAX) * 2.0 - 1.0
+}
+
+fn lfo_wave(shape: &ModeBlend<3>, phase: f64) -> f64 {
+    (TAU * phase).sin() * shape.weights[0]
+        + (1.0 - 4.0 * (phase - 0.5).abs()) * shape.weights[1]
+        + (if phase < 0.5 { 1.0 } else { -1.0 }) * shape.weights[2]
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -776,6 +884,7 @@ struct SynthVoice {
     velocity: u8,
     frequency: f64,
     phases: [f64; 3],
+    noise: u32,
     amp: Envelope,
     modulation: Envelope,
     filter: Filter,
@@ -788,6 +897,7 @@ impl SynthVoice {
         velocity: 0,
         frequency: 0.0,
         phases: [0.0; 3],
+        noise: 1,
         amp: Envelope::SILENT,
         modulation: Envelope::SILENT,
         filter: Filter::EMPTY,
@@ -796,11 +906,11 @@ impl SynthVoice {
 
 fn matrix_displacements(
     params: &Parameters,
-    sources: &[ModeBlend<4>; MATRIX_ROUTES],
+    sources: &[ModeBlend<5>; MATRIX_ROUTES],
     targets: &[ModeBlend<17>; MATRIX_ROUTES],
     amplitude_envelope: f64,
     modulation_envelope: f64,
-    lfo: f64,
+    lfos: [f64; 2],
 ) -> [f64; 17] {
     let mut result = [0.0; 17];
     for route in 0..MATRIX_ROUTES {
@@ -812,12 +922,16 @@ fn matrix_displacements(
             match sources[route].target {
                 1 => amplitude_envelope,
                 2 => modulation_envelope,
-                3 => lfo,
+                3 => lfos[0],
+                4 => lfos[1],
                 _ => continue,
             }
         } else {
             let weights = sources[route].weights;
-            amplitude_envelope * weights[1] + modulation_envelope * weights[2] + lfo * weights[3]
+            amplitude_envelope * weights[1]
+                + modulation_envelope * weights[2]
+                + lfos[0] * weights[3]
+                + lfos[1] * weights[4]
         };
         let contribution = source * amount;
         if contribution == 0.0 {
@@ -841,12 +955,12 @@ fn matrix_displacements(
 struct Oscil {
     params: Parameters,
     voices: [SynthVoice; VOICES],
-    lfo_phase: f64,
+    lfo_phases: [f64; 2],
     control_counter: u32,
-    oscillator_shapes: [ModeBlend<4>; 3],
+    oscillator_shapes: [ModeBlend<5>; 3],
     filter_mode: ModeBlend<3>,
-    lfo_shape: ModeBlend<3>,
-    matrix_sources: [ModeBlend<4>; MATRIX_ROUTES],
+    lfo_shapes: [ModeBlend<3>; 2],
+    matrix_sources: [ModeBlend<5>; MATRIX_ROUTES],
     matrix_targets: [ModeBlend<17>; MATRIX_ROUTES],
 }
 
@@ -862,7 +976,7 @@ impl Oscil {
             ModeBlend::new(params.get(OSC_BASE + osc as u32 * OSC_STRIDE) as u32)
         });
         let filter_mode = ModeBlend::new(params.get(FILTER_TYPE) as u32);
-        let lfo_shape = ModeBlend::new(params.get(LFO_SHAPE) as u32);
+        let lfo_shapes = LFO_BASES.map(|base| ModeBlend::new(params.get(base + 3) as u32));
         let matrix_sources = std::array::from_fn(|route| {
             ModeBlend::new(
                 params.get(MATRIX_BASE + route as u32 * MATRIX_STRIDE + MATRIX_SOURCE) as u32,
@@ -876,11 +990,11 @@ impl Oscil {
         Self {
             params,
             voices: [SynthVoice::SILENT; VOICES],
-            lfo_phase: 0.0,
+            lfo_phases: [0.0; 2],
             control_counter: 0,
             oscillator_shapes,
             filter_mode,
-            lfo_shape,
+            lfo_shapes,
             matrix_sources,
             matrix_targets,
         }
@@ -898,7 +1012,8 @@ impl Oscil {
         }
         match id {
             FILTER_TYPE => self.filter_mode.set(self.params.get(id) as u32),
-            LFO_SHAPE => self.lfo_shape.set(self.params.get(id) as u32),
+            LFO_SHAPE => self.lfo_shapes[0].set(self.params.get(id) as u32),
+            LFO2_SHAPE => self.lfo_shapes[1].set(self.params.get(id) as u32),
             100 | 110 | 120 => self.oscillator_shapes[((id - OSC_BASE) / OSC_STRIDE) as usize]
                 .set(self.params.get(id) as u32),
             _ => {}
@@ -910,13 +1025,13 @@ impl PluginProcessor for Oscil {
     fn reset(&mut self) {
         self.voices.fill(SynthVoice::SILENT);
         self.params.finish();
-        self.lfo_phase = 0.0;
+        self.lfo_phases = [0.0; 2];
         self.control_counter = 0;
         for (osc, blend) in self.oscillator_shapes.iter_mut().enumerate() {
             *blend = ModeBlend::new(self.params.get(OSC_BASE + osc as u32 * OSC_STRIDE) as u32);
         }
         self.filter_mode = ModeBlend::new(self.params.get(FILTER_TYPE) as u32);
-        self.lfo_shape = ModeBlend::new(self.params.get(LFO_SHAPE) as u32);
+        self.lfo_shapes = LFO_BASES.map(|base| ModeBlend::new(self.params.get(base + 3) as u32));
         for route in 0..MATRIX_ROUTES {
             let base = MATRIX_BASE + route as u32 * MATRIX_STRIDE;
             self.matrix_sources[route] =
@@ -973,12 +1088,18 @@ impl PluginProcessor for Oscil {
                     key,
                     velocity,
                     frequency: note_hz(key),
+                    noise: (id as u32 ^ (id >> 32) as u32)
+                        .wrapping_mul(0x9E37_79B9)
+                        .wrapping_add(u32::from(key) << 8 | slot as u32)
+                        | 1,
                     amp: Envelope::trigger(),
                     modulation: Envelope::trigger(),
                     ..SynthVoice::SILENT
                 };
-                if self.params.get(LFO_RETRIGGER) > 0.5 {
-                    self.lfo_phase = 0.0;
+                for (phase, base) in self.lfo_phases.iter_mut().zip(LFO_BASES) {
+                    if self.params.get(base + 4) > 0.5 {
+                        *phase = 0.0;
+                    }
                 }
                 self.control_counter = 0;
             }
@@ -1000,11 +1121,17 @@ impl PluginProcessor for Oscil {
             let p = &self.params;
             let env = p.envelope(ATTACK);
             let filter_env = p.envelope(FILTER_ATTACK);
-            let lfo = (TAU * self.lfo_phase).sin() * self.lfo_shape.weights[0]
-                + (1.0 - 4.0 * (self.lfo_phase - 0.5).abs()) * self.lfo_shape.weights[1]
-                + (if self.lfo_phase < 0.5 { 1.0 } else { -1.0 }) * self.lfo_shape.weights[2];
-            self.lfo_phase = (self.lfo_phase + p.get(LFO_RATE) / f64::from(SAMPLE_RATE)).fract();
-            let pitch_modulation = (lfo * p.get(LFO_PITCH) / 1200.0).exp2();
+            let lfos: [f64; 2] =
+                std::array::from_fn(|lfo| lfo_wave(&self.lfo_shapes[lfo], self.lfo_phases[lfo]));
+            let mut lfo_cents = 0.0;
+            let mut lfo_octaves = 0.0;
+            for (lfo, base) in LFO_BASES.into_iter().enumerate() {
+                self.lfo_phases[lfo] =
+                    (self.lfo_phases[lfo] + p.get(base) / f64::from(SAMPLE_RATE)).fract();
+                lfo_cents += lfos[lfo] * p.get(base + 1);
+                lfo_octaves += lfos[lfo] * p.get(base + 2);
+            }
+            let pitch_modulation = (lfo_cents / 1200.0).exp2();
             let mut tuning = [0.0; 3];
             let mut levels = [[0.0; 2]; 3];
             for osc in 0..3 {
@@ -1040,7 +1167,7 @@ impl PluginProcessor for Oscil {
                         &self.matrix_targets,
                         envelope,
                         modulation,
-                        lfo,
+                        lfos,
                     )
                 } else {
                     [0.0; 17]
@@ -1058,11 +1185,11 @@ impl PluginProcessor for Oscil {
                     let step = raw_step.min(0.49);
                     let width =
                         (p.get(base + OSC_PULSE_WIDTH) + matrix[11 + osc]).clamp(0.05, 0.95);
-                    let sample = if raw_step >= 0.49 {
+                    let weights = self.oscillator_shapes[osc].weights;
+                    let tone = if raw_step >= 0.49 {
                         0.0
                     } else {
-                        self.oscillator_shapes[osc]
-                            .weights
+                        weights[..NOISE_SHAPE as usize]
                             .iter()
                             .enumerate()
                             .filter(|(_, weight)| **weight > 0.0)
@@ -1071,6 +1198,12 @@ impl PluginProcessor for Oscil {
                             })
                             .sum::<f64>()
                             * ((0.49 - raw_step) / 0.07).clamp(0.0, 1.0)
+                    };
+                    let noise = weights[NOISE_SHAPE as usize];
+                    let sample = if noise > 0.0 {
+                        tone + noise * white_noise(&mut voice.noise)
+                    } else {
+                        tone
                     };
                     voice.phases[osc] = (voice.phases[osc] + step).fract();
                     let osc_levels = if matrix[4 + osc] != 0.0 || matrix[8 + osc] != 0.0 {
@@ -1089,7 +1222,7 @@ impl PluginProcessor for Oscil {
                 if self.control_counter == 0 {
                     let octaves = modulation * p.get(FILTER_ENVELOPE)
                         + (f64::from(voice.key) - 60.0) / 12.0 * p.get(FILTER_KEYTRACK)
-                        + lfo * p.get(LFO_FILTER)
+                        + lfo_octaves
                         + matrix[14];
                     let resonance = (p.get(FILTER_RESONANCE)
                         * matrix[15].clamp(-16.0, 16.0).exp2())
@@ -1124,7 +1257,9 @@ impl PluginProcessor for Oscil {
                 shape.advance();
             }
             self.filter_mode.advance();
-            self.lfo_shape.advance();
+            for shape in &mut self.lfo_shapes {
+                shape.advance();
+            }
             for source in &mut self.matrix_sources {
                 source.advance();
             }

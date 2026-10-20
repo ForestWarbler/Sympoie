@@ -1,4 +1,5 @@
 pub mod audio_file;
+pub mod audio_import;
 pub mod automation;
 pub mod bounce;
 pub mod builtin;

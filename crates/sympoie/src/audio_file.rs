@@ -186,7 +186,10 @@ enum Sink {
     /// FLAC: the whole stream is encoded at the end, when its length and
     /// checksum are known.
     Flac(Vec<i32>),
-    Mp3(Box<mp3lame_encoder::Encoder>, Vec<f32>),
+    /// MP3: the stream is kept until the end, so that LAME's information
+    /// frame at its start can be filled in with the encoder delay and padding
+    /// that decoders trim for gapless playback.
+    Mp3(Box<mp3lame_encoder::Encoder>, Vec<f32>, Vec<u8>),
 }
 
 fn mp3_bitrate(kbps: u32) -> Option<mp3lame_encoder::Bitrate> {
@@ -258,7 +261,7 @@ impl<W: Write> AudioFileWriter<W> {
                     .map_err(|_| io::Error::other("not enough memory to encode the FLAC file"))?;
                 Sink::Flac(samples)
             }
-            FileFormat::Mp3 => Sink::Mp3(Box::new(mp3_encoder(encoding)?), Vec::new()),
+            FileFormat::Mp3 => Sink::Mp3(Box::new(mp3_encoder(encoding)?), Vec::new(), Vec::new()),
         };
         Ok(Self {
             writer,
@@ -313,7 +316,7 @@ impl<W: Write> AudioFileWriter<W> {
         self.bytes.clear();
         let depth = self.encoding.depth;
         let big_endian = self.encoding.format == FileFormat::Aiff;
-        if let Sink::Mp3(encoder, samples) = &mut self.sink {
+        if let Sink::Mp3(encoder, samples, stream) = &mut self.sink {
             samples.clear();
             for &sample in frames.iter().flatten() {
                 if !(-1.0..=1.0).contains(&sample) {
@@ -321,12 +324,10 @@ impl<W: Write> AudioFileWriter<W> {
                 }
                 samples.push(sample.clamp(-1.0, 1.0));
             }
-            self.bytes
-                .reserve(mp3lame_encoder::max_required_buffer_size(frames.len()));
+            stream.reserve(mp3lame_encoder::max_required_buffer_size(frames.len()));
             encoder
-                .encode_to_vec(mp3lame_encoder::InterleavedPcm(samples), &mut self.bytes)
+                .encode_to_vec(mp3lame_encoder::InterleavedPcm(samples), stream)
                 .map_err(|error| io::Error::other(format!("MP3 encoding failed: {error}")))?;
-            self.writer.write_all(&self.bytes)?;
             self.written += frames.len() as u64;
             return Ok(());
         }
@@ -395,12 +396,19 @@ impl<W: Write> AudioFileWriter<W> {
                 let bytes = encode_flac(samples, self.encoding)?;
                 self.writer.write_all(&bytes)?;
             }
-            Sink::Mp3(mut encoder, _) => {
-                let mut bytes = Vec::with_capacity(7200);
+            Sink::Mp3(mut encoder, _, mut stream) => {
+                stream.reserve(7200);
                 encoder
-                    .flush_to_vec::<mp3lame_encoder::FlushGap>(&mut bytes)
+                    .flush_to_vec::<mp3lame_encoder::FlushGap>(&mut stream)
                     .map_err(|error| io::Error::other(format!("MP3 encoding failed: {error}")))?;
-                self.writer.write_all(&bytes)?;
+                let mut tag = Vec::with_capacity(encoder.lame_tag_size());
+                if encoder.lame_tag_encode_to_vec(&mut tag).is_some() {
+                    let start = encoder.id3v2_tag_size();
+                    if let Some(frame) = stream.get_mut(start..start + tag.len()) {
+                        frame.copy_from_slice(&tag);
+                    }
+                }
+                self.writer.write_all(&stream)?;
             }
         }
         self.writer.flush()?;
@@ -458,8 +466,17 @@ fn encode_flac(samples: Vec<i32>, encoding: Encoding) -> io::Result<Vec<u8>> {
         rate: encoding.sample_rate as usize,
         read: 0,
     };
-    let stream = flacenc::encode_with_fixed_block_size(&config, source, config.block_size)
+    let mut stream = flacenc::encode_with_fixed_block_size(&config, source, config.block_size)
         .map_err(|error| io::Error::other(format!("FLAC encoding failed: {error}")))?;
+    // flacenc counts the shorter last block in the minimum block size. FLAC
+    // excludes it, and decoders such as symphonia read a minimum below the
+    // maximum as variable block sizes, which this stream does not use.
+    let info = stream.stream_info_mut();
+    let max_block = info.max_block_size();
+    if info.min_block_size() < max_block {
+        info.set_block_sizes(max_block, max_block)
+            .map_err(|error| io::Error::other(format!("FLAC encoding failed: {error}")))?;
+    }
     let mut sink = flacenc::bitsink::ByteSink::new();
     stream
         .write(&mut sink)

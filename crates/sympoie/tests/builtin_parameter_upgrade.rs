@@ -130,9 +130,13 @@ fn plugin_bytes(instance: &PluginInstance) -> Vec<u8> {
 }
 
 fn old_file(project: &Project, id: u64) -> Vec<u8> {
-    let current = project.plugin(id).unwrap();
-    let mut old = current.clone();
+    let mut old = project.plugin(id).unwrap().clone();
     old.parameters.retain(|p| !is_matrix(p.id));
+    file_with_plugin(project, id, &old)
+}
+
+fn file_with_plugin(project: &Project, id: u64, old: &PluginInstance) -> Vec<u8> {
+    let current = project.plugin(id).unwrap();
     let current_chunk = plugin_bytes(current);
     let mut encoded = bytes(project);
     let matches: Vec<usize> = encoded
@@ -146,7 +150,7 @@ fn old_file(project: &Project, id: u64) -> Vec<u8> {
         "plugin wire encoding must match exactly once"
     );
     let at = matches[0];
-    encoded.splice(at..at + current_chunk.len(), plugin_bytes(&old));
+    encoded.splice(at..at + current_chunk.len(), plugin_bytes(old));
     encoded
 }
 
@@ -191,6 +195,50 @@ fn old_files_gain_editable_matrix_routes_without_changing_legacy_automation() {
     assert_eq!(twice.plugin(id), restored.plugin(id));
     assert_eq!(
         twice.tracks()[1].automation(),
+        restored.tracks()[1].automation()
+    );
+}
+
+#[test]
+fn grown_choice_lists_keep_saved_options_and_their_automation() {
+    // Before Noise and LFO 2, oscillator shapes and matrix sources had three steps.
+    let (mut project, id) = project_with_instrument(BuiltinKind::Oscil.instance());
+    let track = project.track_ids().nth(1).unwrap();
+    project
+        .set_track_automation(track, lane(id, 110, [2.0 / 3.0, 1.0]))
+        .unwrap();
+    let mut old = project.plugin(id).unwrap().clone();
+    old.parameters.retain(|p| !(50..55).contains(&p.id));
+    for p in &mut old.parameters {
+        match p.id {
+            100 | 200 => (p.value, p.steps) = (1.0, 3),
+            110 | 120 | 203 => (p.value, p.steps) = (p.value * 4.0 / 3.0, 3),
+            _ => {}
+        }
+    }
+    let restored = read_project(file_with_plugin(&project, id, &old).as_slice()).unwrap();
+    let plugin = restored.plugin(id).unwrap();
+    assert_eq!(builtin::value(plugin, 100), 3.0, "Pulse stays Pulse");
+    assert_eq!(builtin::value(plugin, 110), 2.0, "Saw stays Saw");
+    assert_eq!(builtin::value(plugin, 200), 3.0, "the old LFO is LFO 1");
+    assert_eq!(builtin::value(plugin, 203), 0.0);
+    assert!(
+        plugin
+            .parameters
+            .iter()
+            .all(|p| p.id != 100 || p.steps == 4)
+    );
+    assert_eq!(builtin::value(plugin, 53), 0.0);
+    let values: Vec<f64> = restored.tracks()[1].automation()[0]
+        .points()
+        .iter()
+        .map(|point| point.value)
+        .collect();
+    assert_eq!(values, [0.5, 0.75]);
+    let again = read_project(bytes(&restored).as_slice()).unwrap();
+    assert_eq!(again.plugin(id), restored.plugin(id));
+    assert_eq!(
+        again.tracks()[1].automation(),
         restored.tracks()[1].automation()
     );
 }

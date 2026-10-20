@@ -45,7 +45,7 @@ pub(super) fn show(
             footer.min + vec2(8.0, 3.0),
             vec2(footer.width() - 16.0, 14.0),
         ),
-        "Double-click WAV files to import",
+        "Double-click a sample to load it into a Sampler",
         theme::prop(10.0),
         theme::TEXT_DIM,
         Align2::LEFT_CENTER,
@@ -281,24 +281,20 @@ fn file(
         Align2::LEFT_CENTER,
     );
     let hint = if supported {
-        "Double-click to import audio at the playhead"
+        "Double-click to load into the selected Sampler, or a new Sampler track\nDrag onto the arrangement to import it as audio"
     } else {
-        "Only WAV audio can currently be imported"
+        "Only WAV, AIFF, FLAC and MP3 files can be imported"
     };
     if response
         .on_hover_text(format!("{}\n{hint}", path.display()))
         .double_clicked()
         && supported
     {
-        actions.push(Action::ImportAudio {
-            paths: vec![path.to_owned()],
+        actions.push(Action::LoadSampleIntoSampler {
+            path: path.to_owned(),
             track: target(inputs).filter(|&track| {
-                matches!(
-                    inputs.project.tracks()[track],
-                    sympoie::track::Track::Audio(_)
-                )
+                crate::document::edit::sampler_on(inputs.project, track).is_some()
             }),
-            start: None,
         });
     }
 }

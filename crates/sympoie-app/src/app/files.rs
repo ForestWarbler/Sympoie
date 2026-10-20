@@ -1,15 +1,18 @@
 use std::path::{Path, PathBuf};
 
+use sympoie::audio_import::{FORMATS_DESCRIPTION, read_audio};
 use sympoie::project::{AudioBuffer, Project};
-use sympoie::wav::read_wav;
 
-use super::{SympoieApp, file_name, has_extension};
+use super::{SympoieApp, audio_dialog_extensions, file_name, has_extension};
 use crate::document::Document;
 use crate::document::edit;
 
+/// Sampler start, end, loop start and loop end (normalized) that play a whole new sample.
+const FULL_SAMPLE: [(u32, f64); 4] = [(30, 0.0), (31, 1.0), (32, 0.0), (33, 1.0)];
+
 impl SympoieApp {
     pub(super) fn load_sampler_sample(&mut self, id: u64) {
-        use sympoie::builtin::{BuiltinKind, instruments::sample_state_from_wav};
+        use sympoie::builtin::BuiltinKind;
         if !self.document.project().plugin(id).is_some_and(|plugin| {
             BuiltinKind::from_descriptor(&plugin.descriptor) == Some(BuiltinKind::Sampler)
         }) {
@@ -18,19 +21,68 @@ impl SympoieApp {
         self.release_preview_before_dialog();
         let Some(path) = rfd::FileDialog::new()
             .set_title("Load Sampler Audio")
-            .add_filter("WAV audio", &["wav", "wave"])
+            .add_filter("Audio", &audio_dialog_extensions())
             .pick_file()
         else {
             return;
         };
-        match sample_state_from_wav(&path) {
+        self.set_sampler_sample(id, &path);
+    }
+
+    /// Loads `path` into the Sampler on `track`, or adds a MIDI track named after the
+    /// file with a Sampler holding it when `track` has no Sampler.
+    pub(super) fn load_sample_into_sampler(&mut self, path: &Path, track: Option<usize>) {
+        use sympoie::builtin::{BuiltinKind, instruments::sample_state_from_wav};
+        if let Some(id) = track.and_then(|track| edit::sampler_on(self.document.project(), track)) {
+            self.set_sampler_sample(id, path);
+            return;
+        }
+        let state = match sample_state_from_wav(path) {
+            Ok(state) => state,
+            Err(error) => {
+                self.error(format!("Could not load sample: {error}"));
+                return;
+            }
+        };
+        let name = path.file_stem().map_or_else(
+            || "Sampler".to_owned(),
+            |stem| stem.to_string_lossy().into_owned(),
+        );
+        let mut instance = BuiltinKind::Sampler.instance();
+        instance.state = state;
+        for parameter in &mut instance.parameters {
+            if let Some(&(_, value)) = FULL_SAMPLE.iter().find(|(id, _)| *id == parameter.id) {
+                parameter.value = value;
+            }
+        }
+        let added = self.edit_structural("Add Sampler Track", |project| {
+            let index = edit::add_track(project, edit::TrackKind::Midi, Some(name));
+            edit::insert_plugin(project, index, instance, None)?;
+            Ok(index)
+        });
+        if let Some(index) = added {
+            self.selection = crate::state::Selection {
+                tracks: std::collections::BTreeSet::from([index]),
+                clip: None,
+                range: None,
+            };
+            self.piano_roll.focused = false;
+            self.sync_engine();
+            self.info(format!("Added a Sampler track with {}", file_name(path)));
+        }
+    }
+
+    /// Replaces the sample in the Sampler `id` with `path`, playing all of it.
+    fn set_sampler_sample(&mut self, id: u64, path: &Path) {
+        use sympoie::builtin::instruments::sample_state_from_wav;
+        match sample_state_from_wav(path) {
             Ok(state) => {
                 if self
                     .edit_structural("Load Sampler Audio", |project| {
                         project
                             .set_plugin_state(id, state)
                             .map_err(|e| e.to_string())?;
-                        for (parameter, value) in [(30, 0.0), (31, 1.0), (32, 0.0), (33, 1.0)] {
+                        for (parameter, value) in FULL_SAMPLE {
                             project
                                 .set_plugin_parameter(id, parameter, value)
                                 .map_err(|e| e.to_string())?;
@@ -39,7 +91,7 @@ impl SympoieApp {
                     })
                     .is_some()
                 {
-                    self.info(format!("Loaded {} into Sampler", file_name(&path)));
+                    self.info(format!("Loaded {} into Sampler", file_name(path)));
                 }
             }
             Err(error) => self.error(format!("Could not load sample: {error}")),
@@ -128,14 +180,14 @@ impl SympoieApp {
                 || "Audio".to_owned(),
                 |stem| stem.to_string_lossy().into_owned(),
             );
-            match read_wav(path) {
+            match read_audio(path) {
                 Ok(audio) => decoded.push((name, audio)),
                 Err(error) => failures.push(format!("{}: {error}", file_name(path))),
             }
         }
         if !failures.is_empty() {
             self.error(format!(
-                "Couldn't import {}. Sympoie reads 48 kHz stereo PCM16 or float32 WAV files.",
+                "Couldn't import {}. Sympoie reads {FORMATS_DESCRIPTION} files.",
                 failures.join("; ")
             ));
         }
@@ -180,3 +232,7 @@ impl SympoieApp {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "files_tests.rs"]
+mod tests;

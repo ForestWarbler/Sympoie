@@ -658,10 +658,7 @@ impl SympoieApp {
                 self.release_preview_before_dialog();
                 if let Some(paths) = rfd::FileDialog::new()
                     .set_title("Import Audio")
-                    .add_filter(
-                        "WAV audio (48 kHz stereo, PCM16 or float32)",
-                        &["wav", "WAV"],
-                    )
+                    .add_filter("Audio", &super::audio_dialog_extensions())
                     .pick_files()
                 {
                     self.import(paths, track, start);
@@ -863,6 +860,9 @@ impl SympoieApp {
                 value,
             } => self.set_plugin_parameter(id, parameter, value),
             Action::LoadSamplerSample { id } => self.load_sampler_sample(id),
+            Action::LoadSampleIntoSampler { path, track } => {
+                self.load_sample_into_sampler(&path, track);
+            }
             Action::ResetBuiltinParameters { id } => {
                 self.edit("Reset Device Controls", |project| {
                     let plugin = project.plugin(id).ok_or("Device no longer exists")?;

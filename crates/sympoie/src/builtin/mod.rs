@@ -139,6 +139,8 @@ impl ParameterSpec {
 }
 
 pub const OSC_SHAPES: [&str; 4] = ["Sine", "Triangle", "Saw", "Pulse"];
+/// Oscil's oscillator shapes: the shared four plus white noise.
+pub const OSCIL_SHAPES: [&str; 5] = ["Sine", "Triangle", "Saw", "Pulse", "Noise"];
 pub const FILTER_TYPES: [&str; 3] = ["Low-pass", "High-pass", "Band-pass"];
 pub const LFO_SHAPES: [&str; 3] = ["Sine", "Triangle", "Square"];
 pub const PLAYBACK_MODES: [&str; 3] = ["One shot", "Gate", "Loop"];
@@ -155,8 +157,9 @@ const SWITCH: [&str; 2] = ["Off", "On"];
 
 pub fn choices(kind: BuiltinKind, id: u32) -> Option<&'static [&'static str]> {
     use instruments::{
-        FILTER_TYPE, LFO_SHAPE, MATRIX_BASE, MATRIX_ROUTES, MATRIX_SOURCE, MATRIX_SOURCE_LABELS,
-        MATRIX_STRIDE, MATRIX_TARGET, MATRIX_TARGET_LABELS, OSC_BASE, OSC_SHAPE, OSC_STRIDE,
+        FILTER_TYPE, LFO_SHAPE, LFO2_SHAPE, MATRIX_BASE, MATRIX_ROUTES, MATRIX_SOURCE,
+        MATRIX_SOURCE_LABELS, MATRIX_STRIDE, MATRIX_TARGET, MATRIX_TARGET_LABELS, OSC_BASE,
+        OSC_SHAPE, OSC_STRIDE,
     };
     let spec = parameters(kind).into_iter().find(|spec| spec.id == id)?;
     let named: Option<&'static [&'static str]> = match kind {
@@ -166,12 +169,12 @@ pub fn choices(kind: BuiltinKind, id: u32) -> Option<&'static [&'static str]> {
                 .then(|| (id - MATRIX_BASE) % MATRIX_STRIDE);
             if id == FILTER_TYPE {
                 Some(&FILTER_TYPES)
-            } else if id == LFO_SHAPE {
+            } else if id == LFO_SHAPE || id == LFO2_SHAPE {
                 Some(&LFO_SHAPES)
             } else if (OSC_BASE..OSC_BASE + 3 * OSC_STRIDE).contains(&id)
                 && (id - OSC_BASE) % OSC_STRIDE == OSC_SHAPE
             {
-                Some(&OSC_SHAPES)
+                Some(&OSCIL_SHAPES)
             } else if matrix == Some(MATRIX_SOURCE) {
                 Some(&MATRIX_SOURCE_LABELS)
             } else if matrix == Some(MATRIX_TARGET) {
@@ -229,7 +232,17 @@ pub fn complete_parameters(instance: &mut PluginInstance) -> Result<bool, Plugin
     if instance.parameters.len() + missing.len() > MAX_PLUGIN_PARAMETERS {
         return Err(PluginError::TooManyParameters);
     }
-    let changed = !missing.is_empty();
+    let mut changed = !missing.is_empty();
+    for (parameter, old, new) in choice_upgrades(instance) {
+        let stored = instance
+            .parameters
+            .iter_mut()
+            .find(|stored| stored.id == parameter)
+            .expect("upgrades only name stored parameters");
+        stored.value = upgrade_choice(stored.value, old, new);
+        stored.steps = new;
+        changed = true;
+    }
     instance
         .parameters
         .extend(missing.into_iter().map(|spec| PluginParameter {
@@ -241,6 +254,33 @@ pub fn complete_parameters(instance: &mut PluginInstance) -> Result<bool, Plugin
             read_only: false,
         }));
     Ok(changed)
+}
+
+/// Stepped parameters stored with fewer steps than the device now has, as
+/// `(id, stored steps, current steps)`. Choice lists only ever grow at the end, so the
+/// stored option index stays the same while its normalized value is rescaled.
+pub fn choice_upgrades(instance: &PluginInstance) -> Vec<(u32, u32, u32)> {
+    let Some(kind) = BuiltinKind::from_descriptor(&instance.descriptor) else {
+        return Vec::new();
+    };
+    let specs = parameters(kind);
+    instance
+        .parameters
+        .iter()
+        .filter_map(|stored| {
+            let spec = specs.iter().find(|spec| spec.id == stored.id)?;
+            (stored.steps > 0 && spec.steps > stored.steps).then_some((
+                stored.id,
+                stored.steps,
+                spec.steps,
+            ))
+        })
+        .collect()
+}
+
+/// Rescales a normalized choice value saved with `old` steps to one with `new` steps.
+pub fn upgrade_choice(value: f64, old: u32, new: u32) -> f64 {
+    ((value.clamp(0.0, 1.0) * f64::from(old)).round() / f64::from(new)).clamp(0.0, 1.0)
 }
 
 /// Names of the device's factory presets, empty for devices without any.
@@ -548,7 +588,8 @@ mod choice_tests {
         }
         assert!(named > 20);
         assert_eq!(choices(BuiltinKind::Oscil, 22), Some(&FILTER_TYPES[..]));
-        assert_eq!(choices(BuiltinKind::Oscil, 120), Some(&OSC_SHAPES[..]));
+        assert_eq!(choices(BuiltinKind::Oscil, 120), Some(&OSCIL_SHAPES[..]));
+        assert_eq!(choices(BuiltinKind::Oscil, 53), Some(&LFO_SHAPES[..]));
         assert_eq!(choices(BuiltinKind::Oscil, 20), None);
     }
 }

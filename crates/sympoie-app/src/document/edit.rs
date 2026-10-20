@@ -74,6 +74,18 @@ pub fn midi_id(project: &Project, index: usize) -> EditResult<MidiTrackId> {
     }
 }
 
+/// The Sampler that is the instrument of the MIDI track at `track`, if any.
+pub fn sampler_on(project: &Project, track: usize) -> Option<u64> {
+    match project.tracks().get(track)? {
+        sympoie::track::Track::Midi(midi) => midi.plugin_instrument().filter(|plugin| {
+            sympoie::builtin::BuiltinKind::from_descriptor(&plugin.descriptor)
+                == Some(sympoie::builtin::BuiltinKind::Sampler)
+        }),
+        _ => None,
+    }
+    .map(|plugin| plugin.id)
+}
+
 fn unsnapped<T>(project: &mut Project, change: impl FnOnce(&mut Project) -> T) -> T {
     let grid = project.snap_grid();
     project.set_snap_grid(SnapGrid::Off);

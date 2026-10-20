@@ -180,15 +180,57 @@ pub fn sampler_note_tail_frames_with_automation(
     Ok((length / step).ceil() as u64)
 }
 
+/// Builds Sampler state from any audio file Sympoie imports (WAV, AIFF, FLAC
+/// or MP3), kept at the file's own sample rate.
 pub fn sample_state_from_wav(path: &Path) -> Result<Vec<u8>, String> {
-    let file = File::open(path).map_err(|e| format!("Cannot open sample: {e}"))?;
+    let mut file = File::open(path).map_err(|e| format!("Cannot open sample: {e}"))?;
     let length = file.metadata().map_err(|e| e.to_string())?.len();
     let name = path
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("Sample.wav");
     let name: String = name.chars().filter(|c| *c != '\0').take(255).collect();
-    decode_wav(&mut BufReader::new(file), length, &name)
+    let mut riff = [0_u8; 12];
+    let read = file.read(&mut riff).map_err(|e| e.to_string())?;
+    file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+    if read == riff.len() && &riff[..4] == b"RIFF" && &riff[8..] == b"WAVE" {
+        return decode_wav(&mut BufReader::new(file), length, &name);
+    }
+    drop(file);
+    let decoded = crate::audio_import::decode_file(path).map_err(|e| e.to_string())?;
+    state_from_frames(decoded.sample_rate, &decoded.frames, &name)
+}
+
+fn state_from_frames(rate: u32, frames: &[[f32; 2]], name: &str) -> Result<Vec<u8>, String> {
+    if !(8000..=384000).contains(&rate) {
+        return Err("Sampler requires audio at 8–384 kHz".into());
+    }
+    if frames.is_empty() {
+        return Err("The sample contains no audio".into());
+    }
+    if frames.iter().flatten().any(|sample| !sample.is_finite()) {
+        return Err("Sample contains nonfinite or out-of-range audio".into());
+    }
+    let state_len = HEADER_BYTES as u64 + name.len() as u64 + frames.len() as u64 * 8;
+    if state_len > MAX_PLUGIN_STATE_BYTES as u64 || name.len() > MAX_NAME_BYTES {
+        return Err("Decoded sample exceeds the 64 MiB embedded sample limit".into());
+    }
+    let mut state = Vec::new();
+    state
+        .try_reserve_exact(state_len as usize)
+        .map_err(|e| format!("Cannot allocate sample: {e}"))?;
+    state.extend_from_slice(MAGIC);
+    state.extend_from_slice(&rate.to_le_bytes());
+    state.extend_from_slice(&(frames.len() as u32).to_le_bytes());
+    state.extend_from_slice(&(name.len() as u32).to_le_bytes());
+    state.extend_from_slice(&0_u64.to_le_bytes());
+    state.extend_from_slice(name.as_bytes());
+    for frame in frames {
+        state.extend_from_slice(&frame[0].to_le_bytes());
+        state.extend_from_slice(&frame[1].to_le_bytes());
+    }
+    seal_state(&mut state);
+    Ok(state)
 }
 
 fn decode_wav<R: Read + Seek>(

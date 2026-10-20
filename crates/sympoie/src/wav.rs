@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+use crate::audio_import::{DecodedAudio, SAMPLE_RATES, to_engine_rate};
 use crate::project::AudioBuffer;
 use crate::{Frame, SAMPLE_RATE};
 
@@ -9,17 +10,23 @@ const CHANNELS: u16 = 2;
 const BITS_PER_SAMPLE: u16 = 16;
 const BYTES_PER_FRAME: u16 = CHANNELS * BITS_PER_SAMPLE / 8;
 
+/// Reads a WAV file and converts it to the engine's rate. To accept every
+/// format Sympoie imports, use [`crate::audio_import::read_audio`].
 pub fn read_wav(path: impl AsRef<Path>) -> io::Result<AudioBuffer> {
     let file = File::open(path)?;
     let file_len = file.metadata()?.len();
-    decode_wav(&mut BufReader::new(file), file_len)
+    to_engine_rate(decode_wav(&mut BufReader::new(file), file_len)?)
 }
 
 fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
-fn decode_wav<R: Read + Seek>(reader: &mut R, file_len: u64) -> io::Result<AudioBuffer> {
+/// Decodes a WAV at its own sample rate.
+pub(crate) fn decode_wav<R: Read + Seek>(
+    reader: &mut R,
+    file_len: u64,
+) -> io::Result<DecodedAudio> {
     if file_len < 12 {
         return Err(invalid_data("WAV file is shorter than its RIFF header"));
     }
@@ -70,9 +77,10 @@ fn decode_wav<R: Read + Seek>(reader: &mut R, file_len: u64) -> io::Result<Audio
                 if chunk_len < 16 {
                     return Err(invalid_data("WAV fmt chunk is shorter than 16 bytes"));
                 }
-                let mut format = [0_u8; 16];
-                reader.read_exact(&mut format)?;
-                sample_format = Some(validate_format(&format)?);
+                let mut format = [0_u8; 40];
+                let read = chunk_len.min(40) as usize;
+                reader.read_exact(&mut format[..read])?;
+                sample_format = Some(validate_format(&format, chunk_len)?);
             }
             b"data" => {
                 if data_chunk.is_some() {
@@ -86,95 +94,161 @@ fn decode_wav<R: Read + Seek>(reader: &mut R, file_len: u64) -> io::Result<Audio
         position = next_chunk;
     }
 
-    let sample_format =
-        sample_format.ok_or_else(|| invalid_data("WAV is missing its fmt chunk"))?;
-    let bytes_per_frame = sample_format.bytes_per_frame();
+    let format = sample_format.ok_or_else(|| invalid_data("WAV is missing its fmt chunk"))?;
+    let block_align = usize::from(format.block_align);
     let (data_start, data_len) =
         data_chunk.ok_or_else(|| invalid_data("WAV is missing its data chunk"))?;
-    if data_len % u64::from(bytes_per_frame) != 0 {
+    if data_len % block_align as u64 != 0 {
         return Err(invalid_data(
-            "WAV data ends with an incomplete stereo frame",
+            "WAV data ends with an incomplete sample frame",
         ));
     }
-    let frame_count = (data_len / u64::from(bytes_per_frame)) as usize;
-    let mut samples = Vec::new();
-    samples.try_reserve_exact(frame_count).map_err(|error| {
-        io::Error::other(format!("cannot allocate WAV sample storage: {error}"))
-    })?;
+    let frame_count = data_len / block_align as u64;
+    let mut frames = Vec::new();
+    usize::try_from(frame_count)
+        .map_err(|error| error.to_string())
+        .and_then(|count| {
+            frames
+                .try_reserve_exact(count)
+                .map_err(|error| error.to_string())
+        })
+        .map_err(|error| {
+            io::Error::other(format!("cannot allocate WAV sample storage: {error}"))
+        })?;
     reader.seek(SeekFrom::Start(data_start))?;
-    let mut bytes = [0_u8; 4096];
+    let batch_capacity = (16384 / block_align).max(1);
+    let mut bytes = vec![0_u8; batch_capacity * block_align];
     let mut remaining = frame_count;
     while remaining > 0 {
-        let frames = remaining.min(bytes.len() / usize::from(bytes_per_frame));
-        let batch = &mut bytes[..frames * usize::from(bytes_per_frame)];
+        let batch_frames = remaining.min(batch_capacity as u64) as usize;
+        let batch = &mut bytes[..batch_frames * block_align];
         reader.read_exact(batch)?;
-        match sample_format {
-            SampleFormat::Pcm16 => {
-                for frame in batch.as_chunks::<4>().0 {
-                    samples.push([
-                        f32::from(i16::from_le_bytes([frame[0], frame[1]])) / 32768.0,
-                        f32::from(i16::from_le_bytes([frame[2], frame[3]])) / 32768.0,
-                    ]);
-                }
-            }
-            SampleFormat::Float32 => {
-                for frame in batch.as_chunks::<8>().0 {
-                    samples.push([
-                        f32::from_le_bytes(frame[..4].try_into().unwrap()),
-                        f32::from_le_bytes(frame[4..].try_into().unwrap()),
-                    ]);
-                }
-            }
-        }
-        remaining -= frames;
+        frames.extend(
+            batch
+                .chunks_exact(block_align)
+                .map(|frame| format.decode_frame(frame)),
+        );
+        remaining -= batch_frames as u64;
     }
-    AudioBuffer::new(samples).map_err(|error| invalid_data(error.to_string()))
+    Ok(DecodedAudio {
+        sample_rate: format.sample_rate,
+        frames,
+    })
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Encoding {
+    Pcm,
+    Float,
+}
+
+/// The layout of a WAV's samples, as declared by its fmt chunk.
 #[derive(Clone, Copy)]
-enum SampleFormat {
-    Pcm16,
-    Float32,
+struct SampleFormat {
+    encoding: Encoding,
+    bytes_per_sample: u16,
+    channels: u16,
+    block_align: u16,
+    sample_rate: u32,
 }
 
 impl SampleFormat {
-    fn bytes_per_frame(self) -> u16 {
-        match self {
-            Self::Pcm16 => 4,
-            Self::Float32 => 8,
+    /// Mono is copied to both sides; files with more channels keep the first
+    /// two, which WAV defines as front left and front right.
+    fn decode_frame(self, frame: &[u8]) -> Frame {
+        let width = usize::from(self.bytes_per_sample);
+        let left = self.decode_sample(&frame[..width]);
+        let right = if self.channels == 1 {
+            left
+        } else {
+            self.decode_sample(&frame[width..2 * width])
+        };
+        [left, right]
+    }
+
+    fn decode_sample(self, bytes: &[u8]) -> f32 {
+        match (self.encoding, bytes.len()) {
+            (Encoding::Pcm, 1) => (f32::from(bytes[0]) - 128.0) / 128.0,
+            (Encoding::Pcm, 2) => f32::from(i16::from_le_bytes([bytes[0], bytes[1]])) / 32768.0,
+            (Encoding::Pcm, 3) => {
+                (i32::from_le_bytes([0, bytes[0], bytes[1], bytes[2]]) >> 8) as f32 / 8388608.0
+            }
+            (Encoding::Pcm, 4) => {
+                (f64::from(i32::from_le_bytes(bytes.try_into().unwrap())) / 2147483648.0) as f32
+            }
+            (Encoding::Float, 4) => f32::from_le_bytes(bytes.try_into().unwrap()),
+            (Encoding::Float, 8) => f64::from_le_bytes(bytes.try_into().unwrap()) as f32,
+            _ => unreachable!("validate_format admits only these sample widths"),
         }
     }
 }
 
-fn validate_format(format: &[u8; 16]) -> io::Result<SampleFormat> {
-    let encoding = u16::from_le_bytes([format[0], format[1]]);
-    let channels = u16::from_le_bytes([format[2], format[3]]);
-    let sample_rate = u32::from_le_bytes(format[4..8].try_into().unwrap());
-    let byte_rate = u32::from_le_bytes(format[8..12].try_into().unwrap());
-    let block_align = u16::from_le_bytes([format[12], format[13]]);
-    let bit_depth = u16::from_le_bytes([format[14], format[15]]);
-    let sample_format = match (encoding, bit_depth) {
-        (1, 16) => SampleFormat::Pcm16,
-        (3, 32) => SampleFormat::Float32,
+const WAVE_FORMAT_PCM: u16 = 1;
+const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
+const WAVE_FORMAT_EXTENSIBLE: u16 = 0xfffe;
+/// Bytes 2..16 of every KSDATAFORMAT_SUBTYPE GUID; bytes 0..2 are the format tag.
+const SUBFORMAT_GUID_TAIL: [u8; 14] = [0, 0, 0, 0, 16, 0, 128, 0, 0, 170, 0, 56, 155, 113];
+
+/// Checks the first `chunk_len.min(40)` bytes of a fmt chunk.
+fn validate_format(format: &[u8; 40], chunk_len: u64) -> io::Result<SampleFormat> {
+    let u16_at = |at: usize| u16::from_le_bytes([format[at], format[at + 1]]);
+    let u32_at = |at: usize| u32::from_le_bytes(format[at..at + 4].try_into().unwrap());
+    let mut tag = u16_at(0);
+    let channels = u16_at(2);
+    let sample_rate = u32_at(4);
+    let byte_rate = u32_at(8);
+    let block_align = u16_at(12);
+    let bit_depth = u16_at(14);
+    if tag == WAVE_FORMAT_EXTENSIBLE {
+        let extension_len = u16_at(16);
+        if chunk_len < 40
+            || extension_len < 22
+            || 18 + u64::from(extension_len) > chunk_len
+            || format[26..40] != SUBFORMAT_GUID_TAIL
+        {
+            return Err(invalid_data(
+                "unsupported WAVE_FORMAT_EXTENSIBLE header; expected a PCM or IEEE float subformat",
+            ));
+        }
+        if u16_at(18) > bit_depth {
+            return Err(invalid_data(
+                "WAV declares more valid bits than its sample container holds",
+            ));
+        }
+        tag = u16_at(24);
+    }
+    let encoding = match (tag, bit_depth) {
+        (WAVE_FORMAT_PCM, 8 | 16 | 24 | 32) => Encoding::Pcm,
+        (WAVE_FORMAT_IEEE_FLOAT, 32 | 64) => Encoding::Float,
         _ => {
             return Err(invalid_data(format!(
-                "unsupported WAV encoding {encoding} with {bit_depth} bits; expected 16-bit PCM or 32-bit IEEE float"
+                "unsupported WAV encoding {tag} with {bit_depth} bits; expected 8/16/24/32-bit PCM or 32/64-bit IEEE float"
             )));
         }
     };
-    if channels != CHANNELS || sample_rate != SAMPLE_RATE {
+    if channels == 0 {
+        return Err(invalid_data("WAV declares no audio channels"));
+    }
+    if !SAMPLE_RATES.contains(&sample_rate) {
         return Err(invalid_data(format!(
-            "unsupported WAV format: {sample_rate} Hz, {channels} channels; expected 48000 Hz, 2 channels"
+            "unsupported WAV sample rate {sample_rate} Hz; expected 1 kHz to 768 kHz"
         )));
     }
-    if block_align != sample_format.bytes_per_frame()
-        || byte_rate != SAMPLE_RATE * u32::from(sample_format.bytes_per_frame())
+    let bytes_per_sample = bit_depth / 8;
+    if u32::from(block_align) != u32::from(channels) * u32::from(bytes_per_sample)
+        || u64::from(byte_rate) != u64::from(sample_rate) * u64::from(block_align)
     {
         return Err(invalid_data(
             "WAV block alignment or byte rate is inconsistent with its format",
         ));
     }
-    Ok(sample_format)
+    Ok(SampleFormat {
+        encoding,
+        bytes_per_sample,
+        channels,
+        block_align,
+        sample_rate,
+    })
 }
 
 pub struct WavWriter<W: Write> {
@@ -367,6 +441,40 @@ mod tests {
         bytes
     }
 
+    /// A consistent plain fmt chunk.
+    fn plain_format(tag: u16, channels: u16, rate: u32, bits: u16) -> Vec<u8> {
+        let align = channels * bits / 8;
+        let mut bytes = Vec::new();
+        bytes.extend(tag.to_le_bytes());
+        bytes.extend(channels.to_le_bytes());
+        bytes.extend(rate.to_le_bytes());
+        bytes.extend((rate * u32::from(align)).to_le_bytes());
+        bytes.extend(align.to_le_bytes());
+        bytes.extend(bits.to_le_bytes());
+        bytes
+    }
+
+    /// A WAVE_FORMAT_EXTENSIBLE fmt chunk whose subformat is `subformat`.
+    fn extensible_format(
+        subformat: u16,
+        channels: u16,
+        rate: u32,
+        bits: u16,
+        valid_bits: u16,
+    ) -> Vec<u8> {
+        let mut bytes = plain_format(0xfffe, channels, rate, bits);
+        bytes.extend(22_u16.to_le_bytes());
+        bytes.extend(valid_bits.to_le_bytes());
+        bytes.extend(3_u32.to_le_bytes());
+        bytes.extend(subformat.to_le_bytes());
+        bytes.extend(SUBFORMAT_GUID_TAIL);
+        bytes
+    }
+
+    fn wav(format: &[u8], data: &[u8]) -> Vec<u8> {
+        riff(&[(b"fmt ", format), (b"data", data)])
+    }
+
     fn riff(chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
         let mut body = b"WAVE".to_vec();
         for (name, data) in chunks {
@@ -384,7 +492,7 @@ mod tests {
     }
 
     fn decode(bytes: &[u8]) -> io::Result<AudioBuffer> {
-        decode_wav(&mut Cursor::new(bytes), bytes.len() as u64)
+        to_engine_rate(decode_wav(&mut Cursor::new(bytes), bytes.len() as u64)?)
     }
 
     #[test]
@@ -581,7 +689,175 @@ mod tests {
             decode(&bytes)
                 .unwrap_err()
                 .to_string()
-                .contains("incomplete stereo frame")
+                .contains("incomplete sample frame")
+        );
+    }
+
+    #[test]
+    fn decodes_8_bit_unsigned_pcm() {
+        let audio = decode(&wav(&plain_format(1, 2, 48000, 8), &[0, 255, 128, 192])).unwrap();
+        assert_eq!(audio.samples(), &[[-1.0, 127.0 / 128.0], [0.0, 0.5]]);
+    }
+
+    #[test]
+    fn decodes_24_bit_pcm_and_copies_mono_to_both_channels() {
+        let data = [
+            0x00, 0x00, 0x80, 0xff, 0xff, 0x7f, 0x00, 0x00, 0x40, 0xff, 0xff, 0xff,
+        ];
+        let audio = decode(&wav(&plain_format(1, 1, 48000, 24), &data)).unwrap();
+        assert_eq!(
+            audio.samples(),
+            &[
+                [-1.0; 2],
+                [8388607.0 / 8388608.0; 2],
+                [0.5; 2],
+                [-1.0 / 8388608.0; 2]
+            ]
+        );
+    }
+
+    #[test]
+    fn decodes_32_bit_pcm() {
+        let mut data = Vec::new();
+        for sample in [i32::MIN, 1 << 30, 0, -(1 << 29)] {
+            data.extend(sample.to_le_bytes());
+        }
+        let audio = decode(&wav(&plain_format(1, 2, 48000, 32), &data)).unwrap();
+        assert_eq!(audio.samples(), &[[-1.0, 0.5], [0.0, -0.25]]);
+    }
+
+    #[test]
+    fn decodes_64_bit_float_and_rejects_values_beyond_f32() {
+        let mut data = Vec::new();
+        for sample in [0.25_f64, -0.75, 1.5, -2.0] {
+            data.extend(sample.to_le_bytes());
+        }
+        let audio = decode(&wav(&plain_format(3, 2, 48000, 64), &data)).unwrap();
+        assert_eq!(audio.samples(), &[[0.25, -0.75], [1.5, -2.0]]);
+        let data = [f64::MAX.to_le_bytes(), 0.0_f64.to_le_bytes()].concat();
+        assert!(decode(&wav(&plain_format(3, 2, 48000, 64), &data)).is_err());
+    }
+
+    #[test]
+    fn decodes_extensible_float_and_pcm() {
+        let data = [0.5_f32.to_le_bytes(), (-0.125_f32).to_le_bytes()].concat();
+        let audio = decode(&wav(&extensible_format(3, 2, 48000, 32, 32), &data)).unwrap();
+        assert_eq!(audio.samples(), &[[0.5, -0.125]]);
+        // 20 valid bits in a 24-bit container are left-justified, so they
+        // scale like any other 24-bit sample.
+        let data = [0x00, 0x00, 0x40, 0x00, 0x00, 0xc0];
+        let audio = decode(&wav(&extensible_format(1, 2, 48000, 24, 20), &data)).unwrap();
+        assert_eq!(audio.samples(), &[[0.5, -0.5]]);
+    }
+
+    #[test]
+    fn rejects_malformed_extensible_headers() {
+        let good = extensible_format(1, 2, 48000, 16, 16);
+        let mut wrong_guid = good.clone();
+        wrong_guid[30] ^= 1;
+        let mut short_extension = good.clone();
+        short_extension[16..18].copy_from_slice(&20_u16.to_le_bytes());
+        let mut too_many_valid_bits = good.clone();
+        too_many_valid_bits[18..20].copy_from_slice(&17_u16.to_le_bytes());
+        let mut unknown_subformat = good.clone();
+        unknown_subformat[24..26].copy_from_slice(&2_u16.to_le_bytes());
+        for format in [
+            &good[..16],
+            &good[..39],
+            &wrong_guid[..],
+            &short_extension[..],
+            &too_many_valid_bits[..],
+            &unknown_subformat[..],
+        ] {
+            assert!(decode(&wav(format, &[0; 4])).is_err());
+        }
+        assert_eq!(decode(&wav(&good, &[0; 4])).unwrap().samples(), &[[0.0; 2]]);
+    }
+
+    #[test]
+    fn keeps_front_left_and_right_of_multichannel_files() {
+        let mut data = Vec::new();
+        for sample in [16384_i16, -16384, 1000, 2000, 8192, -8192, 3000, 4000] {
+            data.extend(sample.to_le_bytes());
+        }
+        let audio = decode(&wav(&plain_format(1, 4, 48000, 16), &data)).unwrap();
+        assert_eq!(audio.samples(), &[[0.5, -0.5], [0.25, -0.25]]);
+    }
+
+    #[test]
+    fn resamples_24_bit_mono_44100_to_48000() {
+        let frames = 4410;
+        let wave = |time: f64| 0.5 * (2.0 * std::f64::consts::PI * 1000.0 * time).sin();
+        let mut data = Vec::new();
+        for frame in 0..frames {
+            let value = (wave(frame as f64 / 44100.0) * 8388608.0).round() as i32;
+            data.extend_from_slice(&value.to_le_bytes()[..3]);
+        }
+        let audio = decode(&wav(&plain_format(1, 1, 44100, 24), &data)).unwrap();
+        assert_eq!(audio.len(), 4800);
+        for (frame, [left, right]) in audio.samples().iter().enumerate().skip(200).take(4400) {
+            assert_eq!(left, right);
+            let expected = wave(frame as f64 / 48000.0) as f32;
+            assert!(
+                (left - expected).abs() < 1e-3,
+                "frame {frame}: {left} vs {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn resampled_length_rounds_like_the_resampler_and_keeps_dc_level() {
+        for (rate, frames, expected) in [(96000, 1001, 501), (22050, 7, 15), (8000, 0, 0)] {
+            let data: Vec<u8> = std::iter::repeat_n(0.25_f32.to_le_bytes(), frames)
+                .flatten()
+                .collect();
+            let audio = decode(&wav(&plain_format(3, 1, rate, 32), &data)).unwrap();
+            assert_eq!(audio.len(), expected, "{rate} Hz");
+        }
+        let data: Vec<u8> = std::iter::repeat_n(0.25_f32.to_le_bytes(), 9600)
+            .flatten()
+            .collect();
+        let audio = decode(&wav(&plain_format(3, 1, 96000, 32), &data)).unwrap();
+        assert_eq!(audio.len(), 4800);
+        for [left, right] in &audio.samples()[200..4600] {
+            assert!((left - 0.25).abs() < 1e-4 && (right - 0.25).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn rejects_nonfinite_input_before_resampling() {
+        let mut data: Vec<u8> = std::iter::repeat_n(0.0_f32.to_le_bytes(), 64)
+            .flatten()
+            .collect();
+        data[40..44].copy_from_slice(&f32::INFINITY.to_le_bytes());
+        assert!(decode(&wav(&plain_format(3, 1, 44100, 32), &data)).is_err());
+    }
+
+    #[test]
+    fn rejects_formats_it_cannot_decode() {
+        for (format, message) in [
+            (plain_format(1, 2, 48000, 12), "unsupported WAV encoding"),
+            (plain_format(3, 2, 48000, 16), "unsupported WAV encoding"),
+            (plain_format(2, 2, 48000, 16), "unsupported WAV encoding"),
+            (plain_format(1, 0, 48000, 16), "no audio channels"),
+            (plain_format(1, 2, 0, 16), "sample rate"),
+            (plain_format(1, 2, 999, 16), "sample rate"),
+            (plain_format(1, 1, 800_000, 16), "sample rate"),
+        ] {
+            let error = decode(&wav(&format, &[])).unwrap_err().to_string();
+            assert!(error.contains(message), "{error}");
+        }
+        let mut format = plain_format(1, 1, 44100, 24);
+        format[12..14].copy_from_slice(&4_u16.to_le_bytes());
+        assert!(decode(&wav(&format, &[])).is_err());
+        let mut format = plain_format(1, 1, 44100, 24);
+        format[8..12].copy_from_slice(&(48000_u32 * 3).to_le_bytes());
+        assert!(decode(&wav(&format, &[])).is_err());
+        assert!(
+            decode(&wav(&plain_format(1, 1, 48000, 24), &[0, 0]))
+                .unwrap_err()
+                .to_string()
+                .contains("incomplete sample frame")
         );
     }
 }
