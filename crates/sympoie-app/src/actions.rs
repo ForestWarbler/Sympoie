@@ -244,8 +244,24 @@ pub enum Action {
     LoadSamplerSample {
         id: u64,
     },
-    /// Loads an audio file into the Sampler on `track`, or onto a new MIDI track with a
-    /// Sampler when no Sampler track is given.
+    /// Replaces every slice of the Slicer `id` with `starts` (normalized, in key order) as
+    /// one undoable edit named `label`.
+    SetSlices {
+        id: u64,
+        starts: Vec<f64>,
+        label: &'static str,
+    },
+    /// Slices the sample in the Slicer `id` with its own detection settings.
+    AnalyzeSlices {
+        id: u64,
+    },
+    /// Holds `key` on the track of the instrument `id` until `ReleaseMidiAudition`.
+    AuditionInstrumentKey {
+        id: u64,
+        key: u8,
+    },
+    /// Loads an audio file into the Sampler or Slicer on `track`, or onto a new MIDI track
+    /// with a Sampler when no such track is given.
     LoadSampleIntoSampler {
         path: PathBuf,
         track: Option<usize>,

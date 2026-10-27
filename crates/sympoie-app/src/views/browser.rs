@@ -709,7 +709,7 @@ mod tests {
         };
         assert_eq!(
             names(Category::Instruments, ""),
-            ["Oscil", "Sampler", "Rain", "Ferro", "Bass Synth"]
+            ["Oscil", "Sampler", "Slicer", "Rain", "Ferro", "Bass Synth"]
         );
         assert_eq!(
             names(Category::AudioEffects, ""),

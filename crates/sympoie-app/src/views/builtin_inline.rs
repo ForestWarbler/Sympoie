@@ -10,6 +10,8 @@ const GAP: f32 = 4.0;
 mod ferro;
 #[path = "builtin_rain.rs"]
 mod rain;
+#[path = "builtin_slicer.rs"]
+mod slicer;
 #[path = "builtin_varimu.rs"]
 mod varimu;
 
@@ -40,6 +42,7 @@ pub(super) fn show(
     match kind {
         BuiltinKind::Oscil => oscil(ui, &mut deck),
         BuiltinKind::Sampler => sampler(ui, &mut deck),
+        BuiltinKind::Slicer => slicer::compact(ui, &mut deck),
         BuiltinKind::Eq => eq(ui, &mut deck, telemetry),
         BuiltinKind::Comp => comp(ui, &mut deck, telemetry),
         BuiltinKind::VariMu => varimu::compact(ui, &mut deck, telemetry),
@@ -896,6 +899,7 @@ pub(super) fn editor(
             match kind {
                 BuiltinKind::Oscil => oscil_editor(ui, &mut deck),
                 BuiltinKind::Sampler => sampler_editor(ui, &mut deck),
+                BuiltinKind::Slicer => slicer::editor(ui, &mut deck),
                 BuiltinKind::Eq => eq_editor(ui, &mut deck, telemetry),
                 BuiltinKind::Comp => comp_editor(ui, &mut deck, telemetry),
                 BuiltinKind::Rain => rain::editor(ui, &mut deck, telemetry),
@@ -937,6 +941,7 @@ fn header(ui: &mut Ui, deck: &mut Deck, kind: BuiltinKind) {
             let subtitle = match kind {
                 BuiltinKind::Oscil => "Three-oscillator synthesizer",
                 BuiltinKind::Sampler => "Polyphonic sample instrument",
+                BuiltinKind::Slicer => "Sample slicer, one slice per key",
                 BuiltinKind::Eq => "Six-band equalizer",
                 BuiltinKind::Comp => "Compressor",
                 BuiltinKind::VariMu => "Variable-mu tube compressor",
@@ -955,7 +960,9 @@ fn header(ui: &mut Ui, deck: &mut Deck, kind: BuiltinKind) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             let output: &[(u32, &str)] = match kind {
-                BuiltinKind::Oscil | BuiltinKind::Sampler => &[(0, "Gain"), (1, "Pan"), (2, "Vel")],
+                BuiltinKind::Oscil | BuiltinKind::Sampler | BuiltinKind::Slicer => {
+                    &[(0, "Gain"), (1, "Pan"), (2, "Vel")]
+                }
                 BuiltinKind::Eq => &[(31, "Mix"), (30, "Output")],
                 BuiltinKind::Comp => &[(7, "Output"), (6, "Mix"), (5, "Makeup")],
                 BuiltinKind::VariMu | BuiltinKind::Ferro => &[],
@@ -1320,6 +1327,7 @@ mod tests {
             let page_count: usize = match kind {
                 BuiltinKind::Oscil => 6,
                 BuiltinKind::Sampler => 3,
+                BuiltinKind::Slicer => 1,
                 BuiltinKind::Eq => 6,
                 BuiltinKind::Rain => 3,
                 BuiltinKind::Comp | BuiltinKind::VariMu | BuiltinKind::Ferro => 1,

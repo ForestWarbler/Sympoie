@@ -1,18 +1,20 @@
 //! Ferro: an analog-modelled synthesizer after the classic hardware.
 //!
-//! Its signal path follows the big American monosynths: three free-running VCOs with
-//! wide footage ranges, a noise source and a sub-oscillator in the mixer, a
-//! transistor-ladder low-pass with its own contour, a loudness contour, and portamento.
+//! Its layout follows the big American monosynths: three free-running oscillators with
+//! wide footage ranges, a noise source and a sub-oscillator in the mixer, a four-pole
+//! low-pass with its own contour, a loudness contour, and portamento. Its circuits are
+//! the Juno's: saw-core DCOs with comparator pulses and coupling capacitors, and an
+//! IR3109 OTA filter.
 //! A voice switch makes it monophonic (with last-note priority and legato), or a small
 //! polysynth like the Japanese classics, which also lend it a fixed high-pass filter and
 //! a bucket-brigade stereo chorus.
 //!
 //! Two engines share one model:
-//! - **Realtime** runs the voice at 2× oversampling, solves the ladder once per sample
+//! - **Realtime** runs the voice at 2× oversampling, solves the filter once per sample
 //!   from its state, and updates oscillator pitch and filter coefficients every
 //!   [`CONTROL_FRAMES`] samples.
 //! - **Offline** (bounce, export, and the cached render the device can play instead of
-//!   the realtime engine) runs at 8× with steeper decimation, resolves the ladder's
+//!   the realtime engine) runs at 8× with steeper decimation, resolves the filter's
 //!   nonlinear loop until it settles, and moves pitch, glide and cutoff continuously at
 //!   the oversampled rate, so slides and sweeps are perfectly smooth.
 //!
@@ -39,8 +41,9 @@ use crate::plugin::{PluginInstance, PluginProcessContext, PluginProcessor, Rende
 use super::effects::{RATE, parameter};
 use super::{ParameterSpec, Scale, Telemetry};
 use dsp::{
-    Chorus, Contour, ContourRates, Decimator, Drift, Glide, JunoHpf, Ladder, LadderSolve, Pink,
-    Rng, Stage, Sub, Vco, ladder_gain,
+    COUPLING_HZ, Chorus, Contour, ContourRates, Decimator, Drift, FilterSolve, Glide, Ir3109,
+    JunoHpf, OnePole, Pink, Rng, Stage, Sub, Vco, compensation_error, filter_gain,
+    one_pole_coefficient,
 };
 
 pub use dsp::{CHORUS_MODES, WAVES};
@@ -712,6 +715,12 @@ struct Tolerance {
     cutoff: f64,
     /// Contour time scale.
     time: f64,
+    /// Oscillator level error (integrator component spread), per VCO.
+    level: [f64; 3],
+    /// Pulse comparator offset, per VCO.
+    width: [f64; 3],
+    /// Seeds for each VCO's amplitude-compensation error across the keyboard.
+    compensation: [u64; 3],
 }
 
 impl Tolerance {
@@ -725,6 +734,9 @@ impl Tolerance {
             detune: [rng.bipolar(), rng.bipolar(), rng.bipolar()],
             cutoff: rng.bipolar(),
             time: rng.bipolar(),
+            level: [rng.bipolar(), rng.bipolar(), rng.bipolar()],
+            width: [rng.bipolar(), rng.bipolar(), rng.bipolar()],
+            compensation: [rng.next_u64(), rng.next_u64(), rng.next_u64()],
         }
     }
 }
@@ -738,23 +750,32 @@ struct Voice {
     age: u64,
     glide: Glide,
     vco: [Vco; 3],
+    /// Each VCO's coupling capacitor into the mixer.
+    coupling: [OnePole; 3],
     sub: Sub,
     pink: Pink,
-    ladder: Ladder,
+    vcf: Ir3109,
     amp: Contour,
     filter: Contour,
+    /// Drift shared by the voice's oscillators (a common supply), plus each VCO's own
+    /// slow wander and fast jitter, so stacked oscillators keep shifting against each
+    /// other.
     pitch_drift: Drift,
+    osc_drift: [Drift; 3],
+    jitter: [Drift; 3],
     cutoff_drift: Drift,
-    jitter: Drift,
     tolerance: Tolerance,
     /// 0→1 fade of the LFO after a note starts, for the LFO delay.
     lfo_fade: f64,
     feedback: f64,
     osc3: f64,
-    /// Oscillator steps (cycles per oversampled sample) and ladder gain at the last
+    /// Oscillator steps (cycles per oversampled sample) and filter gain at the last
     /// control update; offline mode interpolates from these to the new values.
     steps: [f64; 4],
     gain: f64,
+    /// Per-VCO level including tolerance and compensation error, from the last control
+    /// update.
+    amplitude: [f64; 3],
     previous_steps: [f64; 4],
     previous_gain: f64,
     dirty: bool,
@@ -770,20 +791,23 @@ impl Voice {
             age: 0,
             glide: Glide::default(),
             vco: [Vco::default(); 3],
+            coupling: [OnePole::default(); 3],
             sub: Sub::default(),
             pink: Pink::default(),
-            ladder: Ladder::default(),
+            vcf: Ir3109::default(),
             amp: Contour::default(),
             filter: Contour::default(),
             pitch_drift: Drift::default(),
+            osc_drift: [Drift::default(); 3],
+            jitter: [Drift::default(); 3],
             cutoff_drift: Drift::default(),
-            jitter: Drift::default(),
             tolerance: Tolerance::for_voice(index),
             lfo_fade: 0.0,
             feedback: 0.0,
             osc3: 0.0,
             steps: [0.0; 4],
             gain: 0.0,
+            amplitude: [1.0; 3],
             previous_steps: [0.0; 4],
             previous_gain: 0.0,
             dirty: true,
@@ -937,7 +961,10 @@ impl Ferro {
             }
             voice.lfo_fade = 0.0;
             voice.feedback = 0.0;
-            voice.ladder.reset();
+            voice.vcf.reset();
+            for coupling in &mut voice.coupling {
+                coupling.reset();
+            }
         }
         voice.id = Some(held.id);
         voice.key = held.key;
@@ -1145,8 +1172,9 @@ impl Ferro {
         self.lfo_value
     }
 
-    /// Pitch (as oscillator steps) and ladder gain for a voice at this instant.
-    fn controls(&self, voice: &Voice, bend: f64, lfo: f64) -> ([f64; 4], f64) {
+    /// Pitch (as oscillator steps), filter gain and oscillator levels for a voice at this
+    /// instant.
+    fn controls(&self, voice: &Voice, bend: f64, lfo: f64) -> ([f64; 4], f64, [f64; 3]) {
         let os_rate = RATE * self.oversampling() as f64;
         let drift = self.get(DRIFT) / 100.0;
         let fade = voice.lfo_fade;
@@ -1157,13 +1185,19 @@ impl Ferro {
             _ => self.lfo_hold,
         } * fade;
         let pitch_mod = self.get(MOD_PITCH) * modulation;
-        let wander = voice.pitch_drift_value() * 6.0 * drift + voice.jitter_value() * 0.3 * drift;
+        let shared = voice.pitch_drift.value() * 2.0 * drift;
         let keyboard = voice.glide.pitch + bend + self.get(TUNE) / 100.0;
         let mut steps = [0.0; 4];
+        let mut amplitude = [1.0; 3];
         for (index, step) in steps.iter_mut().take(3).enumerate() {
             let range = RANGE_SEMITONES[self.choice(osc(index as u32, OSC_RANGE)) as usize % 6];
             let tune = self.get(osc(index as u32, OSC_TUNE));
-            let cents = (voice.tolerance.detune[index] * 4.0 * drift + wander) / 100.0;
+            let cents = (voice.tolerance.detune[index] * 4.0
+                + voice.osc_drift[index].value() * 5.0
+                + voice.jitter[index].value() * 0.6)
+                * drift
+                + shared;
+            let cents = cents / 100.0;
             let base = if index == 2 && self.choice(OSC3_KEYBOARD) == 0 {
                 60.0
             } else {
@@ -1176,6 +1210,9 @@ impl Ferro {
             };
             let semitones = base + range + tune + cents + modulated;
             *step = 440.0 * ((semitones - 69.0) / 12.0).exp2() / os_rate;
+            let compensation = compensation_error(voice.tolerance.compensation[index], semitones);
+            amplitude[index] =
+                1.0 + (0.03 * voice.tolerance.level[index] + 0.05 * compensation) * drift;
         }
         // The sub follows oscillator 1, an octave down.
         steps[3] = steps[0];
@@ -1185,9 +1222,9 @@ impl Ferro {
             + self.get(MOD_FILTER) * modulation
             + self.get(FILTER_VELOCITY) * 2.0 * (voice.velocity - 0.5)
             + voice.tolerance.cutoff * 0.08 * drift
-            + voice.cutoff_drift_value() * 0.05 * drift;
+            + voice.cutoff_drift.value() * 0.05 * drift;
         let cutoff = self.get(CUTOFF) * octaves.exp2();
-        (steps, ladder_gain(cutoff, os_rate))
+        (steps, filter_gain(cutoff, os_rate), amplitude)
     }
 
     fn render_sample(&mut self) -> Frame {
@@ -1226,13 +1263,15 @@ impl Ferro {
                 1.0 / (delay * RATE)
             }
         };
-        let solve = LadderSolve {
+        let solve = FilterSolve {
             iterations: if exact { 8 } else { 1 },
             tolerance: 1.0e-7,
             exact,
         };
         let limit = self.voice_limit();
         let drift_amount = self.get(DRIFT);
+        let drift = drift_amount / 100.0;
+        let coupling = one_pole_coefficient(COUPLING_HZ, RATE * factor as f64);
 
         for index in 0..MAX_VOICES {
             if !self.voices[index].sounding() {
@@ -1257,15 +1296,16 @@ impl Ferro {
                 if rng_drift {
                     voice.pitch_drift.tick(&mut self.rng, 9600);
                     voice.cutoff_drift.tick(&mut self.rng, 14_400);
-                    if exact {
-                        voice.jitter.tick(&mut self.rng, 96);
+                    for (index, period) in [7900, 9100, 10_300].into_iter().enumerate() {
+                        voice.osc_drift[index].tick(&mut self.rng, period);
+                        voice.jitter[index].tick(&mut self.rng, 96);
                     }
                 }
             }
             let amp_before = self.voices[index].amp.level;
             let amp = self.voices[index].amp.tick(&amp_rates);
             if control || self.voices[index].dirty {
-                let (steps, gain) = self.controls(&self.voices[index], bend, lfo);
+                let (steps, gain, amplitude) = self.controls(&self.voices[index], bend, lfo);
                 let voice = &mut self.voices[index];
                 if voice.dirty {
                     voice.previous_steps = steps;
@@ -1276,6 +1316,7 @@ impl Ferro {
                 }
                 voice.steps = steps;
                 voice.gain = gain;
+                voice.amplitude = amplitude;
                 voice.dirty = false;
             }
             let voice = &mut self.voices[index];
@@ -1294,10 +1335,19 @@ impl Ferro {
                 } else {
                     (voice.steps, voice.gain, amp)
                 };
-                let o1 = voice.vco[0].tick(waves[0], steps[0], pwm, exact);
-                let o2 = voice.vco[1].tick(waves[1], steps[1], pwm, exact);
-                let o3 = voice.vco[2].tick(waves[2], steps[2], pwm, exact);
-                voice.osc3 = o3;
+                let mut osc = [0.0; 3];
+                for (i, out) in osc.iter_mut().enumerate() {
+                    let width = pwm + 0.02 * voice.tolerance.width[i] * drift;
+                    let raw = voice.vco[i].tick(waves[i], steps[i], width);
+                    if i == 2 {
+                        // Modulation taps oscillator 3 before its coupling capacitor, so
+                        // slow shapes reach pitch and cutoff undistorted.
+                        voice.osc3 = raw;
+                    }
+                    let coupled = raw - voice.coupling[i].lowpass(raw, coupling);
+                    *out = coupled * voice.amplitude[i];
+                }
+                let [o1, o2, o3] = osc;
                 let sub = voice.sub.tick(steps[3]);
                 let white = self.rng.bipolar();
                 let noise = if pink {
@@ -1312,7 +1362,7 @@ impl Ferro {
                     + noise * noise_level * 0.7;
                 let input =
                     mix * 0.5 * drive * (1.0 + 0.25 * k) + feedback * (2.0 * voice.feedback).tanh();
-                let filtered = voice.ladder.tick(input, gain, k, &solve);
+                let filtered = voice.vcf.tick(input, gain, k, &solve);
                 voice.feedback = filtered;
                 self.scratch[sub_index] += filtered * makeup * level * velocity_gain * 0.9;
             }
@@ -1340,18 +1390,6 @@ impl Ferro {
                 cell.store(level.to_bits(), Ordering::Relaxed);
             }
         }
-    }
-}
-
-impl Voice {
-    fn pitch_drift_value(&self) -> f64 {
-        self.pitch_drift.value()
-    }
-    fn cutoff_drift_value(&self) -> f64 {
-        self.cutoff_drift.value()
-    }
-    fn jitter_value(&self) -> f64 {
-        self.jitter.value()
     }
 }
 

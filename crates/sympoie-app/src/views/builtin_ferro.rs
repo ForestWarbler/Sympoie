@@ -257,7 +257,7 @@ pub(super) fn editor(ui: &mut Ui, deck: &mut Deck, telemetry: Option<&Telemetry>
     );
     divider(&painter, at(711.0, 78.0), at(711.0, 296.0), s);
 
-    // Modifiers: the ladder filter and its contour, then the loudness contour.
+    // Modifiers: the filter and its contour, then the loudness contour.
     knob(ui, deck, CUTOFF, at(756.0, 106.0), 18.0 * s, s, "Cutoff");
     knob(ui, deck, EMPHASIS, at(826.0, 110.0), r, s, "Emphasis");
     knob(ui, deck, CONTOUR, at(884.0, 110.0), r, s, "Contour");

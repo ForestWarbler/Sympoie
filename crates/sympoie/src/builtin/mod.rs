@@ -16,6 +16,7 @@ use crate::plugin::{
 pub enum BuiltinKind {
     Oscil,
     Sampler,
+    Slicer,
     Eq,
     Comp,
     VariMu,
@@ -24,9 +25,10 @@ pub enum BuiltinKind {
 }
 
 impl BuiltinKind {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Oscil,
         Self::Sampler,
+        Self::Slicer,
         Self::Eq,
         Self::Comp,
         Self::VariMu,
@@ -38,6 +40,7 @@ impl BuiltinKind {
         match self {
             Self::Oscil => "Oscil",
             Self::Sampler => "Sampler",
+            Self::Slicer => "Slicer",
             Self::Eq => "EQ",
             Self::Comp => "Comp",
             Self::VariMu => "Vari-Mu",
@@ -54,7 +57,9 @@ impl BuiltinKind {
             name: self.name().to_owned(),
             vendor: "Sympoie".to_owned(),
             kind: match self {
-                Self::Oscil | Self::Sampler | Self::Rain | Self::Ferro => PluginKind::Instrument,
+                Self::Oscil | Self::Sampler | Self::Slicer | Self::Rain | Self::Ferro => {
+                    PluginKind::Instrument
+                }
                 _ => PluginKind::Effect,
             },
         }
@@ -184,6 +189,11 @@ pub fn choices(kind: BuiltinKind, id: u32) -> Option<&'static [&'static str]> {
             }
         }
         BuiltinKind::Sampler => (spec.name == "Playback").then_some(&PLAYBACK_MODES[..]),
+        BuiltinKind::Slicer => match id {
+            instruments::SLICE_MODE => Some(&PLAYBACK_MODES[..]),
+            instruments::SLICE_DETECT => Some(&instruments::SLICE_DETECTORS[..]),
+            _ => None,
+        },
         BuiltinKind::Eq => (spec.name.ends_with(" Type")).then_some(&EQ_BAND_TYPES[..]),
         BuiltinKind::Comp => (spec.name == "Detector").then_some(&DETECTORS[..]),
         BuiltinKind::VariMu => match id {
@@ -207,6 +217,7 @@ pub fn parameters(kind: BuiltinKind) -> Vec<ParameterSpec> {
     match kind {
         BuiltinKind::Oscil => instruments::oscil_parameters(),
         BuiltinKind::Sampler => instruments::sampler_parameters(),
+        BuiltinKind::Slicer => instruments::slicer_parameters(),
         BuiltinKind::Eq => effects::eq_parameters(),
         BuiltinKind::Comp => effects::comp_parameters(),
         BuiltinKind::VariMu => varimu::parameters(),
@@ -499,6 +510,7 @@ pub fn create_processor_with_telemetry(
     match BuiltinKind::from_descriptor(&instance.descriptor).ok_or("Unknown built-in device")? {
         BuiltinKind::Oscil => instruments::create_oscil(instance),
         BuiltinKind::Sampler => instruments::create_sampler(instance),
+        BuiltinKind::Slicer => instruments::create_slicer(instance),
         BuiltinKind::Eq => effects::create_eq(instance, telemetry),
         BuiltinKind::Comp => effects::create_comp(instance, telemetry),
         BuiltinKind::VariMu => varimu::create_varimu(instance, telemetry),
@@ -515,7 +527,11 @@ pub fn release_frames(
     let kind = BuiltinKind::from_descriptor(&instance.descriptor)?;
     if !matches!(
         kind,
-        BuiltinKind::Oscil | BuiltinKind::Sampler | BuiltinKind::Rain | BuiltinKind::Ferro
+        BuiltinKind::Oscil
+            | BuiltinKind::Sampler
+            | BuiltinKind::Slicer
+            | BuiltinKind::Rain
+            | BuiltinKind::Ferro
     ) {
         return Some(0);
     }

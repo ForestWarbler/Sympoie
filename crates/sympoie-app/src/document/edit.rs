@@ -74,16 +74,47 @@ pub fn midi_id(project: &Project, index: usize) -> EditResult<MidiTrackId> {
     }
 }
 
-/// The Sampler that is the instrument of the MIDI track at `track`, if any.
+/// The Sampler or Slicer that is the instrument of the MIDI track at `track`, if any.
 pub fn sampler_on(project: &Project, track: usize) -> Option<u64> {
+    use sympoie::builtin::BuiltinKind;
     match project.tracks().get(track)? {
         sympoie::track::Track::Midi(midi) => midi.plugin_instrument().filter(|plugin| {
-            sympoie::builtin::BuiltinKind::from_descriptor(&plugin.descriptor)
-                == Some(sympoie::builtin::BuiltinKind::Sampler)
+            matches!(
+                BuiltinKind::from_descriptor(&plugin.descriptor),
+                Some(BuiltinKind::Sampler | BuiltinKind::Slicer)
+            )
         }),
         _ => None,
     }
     .map(|plugin| plugin.id)
+}
+
+/// Gives the Slicer `id` one slice per entry of `starts` (normalized, in key order).
+pub fn set_slices(project: &mut Project, id: u64, starts: &[f64]) -> EditResult<()> {
+    use sympoie::builtin::instruments::{MAX_SLICES, SLICE_BASE, SLICE_COUNT, slicer_parameters};
+    if starts.is_empty() || starts.len() > MAX_SLICES {
+        return Err(format!("a Slicer holds 1 to {MAX_SLICES} slices"));
+    }
+    if starts.iter().any(|start| !(0.0..1.0).contains(start)) {
+        return Err("slices must start inside the sample".to_owned());
+    }
+    let specs = slicer_parameters();
+    let normalize = |id: u32, value: f64| {
+        specs
+            .iter()
+            .find(|spec| spec.id == id)
+            .map_or(value, |spec| spec.normalize(value))
+    };
+    project
+        .set_plugin_parameter(id, SLICE_COUNT, normalize(SLICE_COUNT, starts.len() as f64))
+        .map_err(|e| e.to_string())?;
+    for (slice, &start) in starts.iter().enumerate() {
+        let parameter = SLICE_BASE + slice as u32;
+        project
+            .set_plugin_parameter(id, parameter, normalize(parameter, start))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn unsnapped<T>(project: &mut Project, change: impl FnOnce(&mut Project) -> T) -> T {

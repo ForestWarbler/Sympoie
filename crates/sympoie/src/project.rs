@@ -1764,17 +1764,26 @@ impl Project {
                         .checked_add(release_frames)
                         .ok_or(TimeError::ConversionOverflow)?;
                     end = end.max(release_end);
-                    if let Some(plugin) = track.plugin_instrument()
-                        && crate::builtin::BuiltinKind::from_descriptor(&plugin.descriptor)
-                            == Some(crate::builtin::BuiltinKind::Sampler)
-                    {
-                        let tail =
-                            crate::builtin::instruments::sampler_note_tail_frames_with_automation(
-                                plugin,
-                                note.key,
-                                track.automation(),
-                            )
-                            .unwrap_or(0);
+                    if let Some(plugin) = track.plugin_instrument() {
+                        use crate::builtin::{BuiltinKind, instruments};
+                        let tail = match BuiltinKind::from_descriptor(&plugin.descriptor) {
+                            Some(BuiltinKind::Sampler) => {
+                                instruments::sampler_note_tail_frames_with_automation(
+                                    plugin,
+                                    note.key,
+                                    track.automation(),
+                                )
+                            }
+                            Some(BuiltinKind::Slicer) => {
+                                instruments::slicer_note_tail_frames_with_automation(
+                                    plugin,
+                                    note.key,
+                                    track.automation(),
+                                )
+                            }
+                            _ => Ok(0),
+                        }
+                        .unwrap_or(0);
                         end = end.max(
                             note_start
                                 .checked_add(tail)

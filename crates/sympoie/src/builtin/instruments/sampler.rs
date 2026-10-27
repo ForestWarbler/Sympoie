@@ -17,15 +17,15 @@ pub struct SamplePreview {
     pub peaks: Vec<[f32; 2]>,
 }
 
-struct SampleHeader<'a> {
-    name: &'a str,
-    frames: usize,
-    rate: u32,
-    audio: &'a [u8],
-    fingerprint: u64,
+pub(super) struct SampleHeader<'a> {
+    pub(super) name: &'a str,
+    pub(super) frames: usize,
+    pub(super) rate: u32,
+    pub(super) audio: &'a [u8],
+    pub(super) fingerprint: u64,
 }
 
-fn header(state: &[u8]) -> Result<SampleHeader<'_>, String> {
+pub(super) fn header(state: &[u8]) -> Result<SampleHeader<'_>, String> {
     if state.len() > MAX_PLUGIN_STATE_BYTES || state.len() < HEADER_BYTES || &state[..8] != MAGIC {
         return Err("Invalid or unsupported Sampler state".into());
     }
@@ -61,7 +61,7 @@ fn header(state: &[u8]) -> Result<SampleHeader<'_>, String> {
     })
 }
 
-fn checksum(state: &[u8]) -> u64 {
+pub(super) fn checksum(state: &[u8]) -> u64 {
     state[..20]
         .iter()
         .chain(state[HEADER_BYTES..].iter())
@@ -83,7 +83,7 @@ pub fn sample_state_fingerprint(state: &[u8]) -> Option<u64> {
     }
 }
 
-fn decode_frame(bytes: &[u8]) -> Result<Frame, String> {
+pub(super) fn decode_frame(bytes: &[u8]) -> Result<Frame, String> {
     let frame = [
         f32::from_le_bytes(bytes[..4].try_into().unwrap()),
         f32::from_le_bytes(bytes[4..8].try_into().unwrap()),
@@ -418,22 +418,7 @@ pub fn create_sampler(instance: &PluginInstance) -> Result<Box<dyn PluginProcess
 
 impl Sampler {
     fn new(instance: &PluginInstance) -> Result<Self, String> {
-        let (audio, rate) = if instance.state.is_empty() {
-            (Vec::new(), SAMPLE_RATE)
-        } else {
-            let sample = header(&instance.state)?;
-            if checksum(&instance.state) != sample.fingerprint {
-                return Err("Sampler state checksum mismatch".into());
-            }
-            let mut audio = Vec::new();
-            audio
-                .try_reserve_exact(sample.frames)
-                .map_err(|e| format!("Cannot allocate sample: {e}"))?;
-            for frame in sample.audio.as_chunks::<8>().0 {
-                audio.push(decode_frame(frame)?);
-            }
-            (audio, sample.rate)
-        };
+        let (audio, rate) = decode_audio(&instance.state)?;
         let octaves = prepare_octaves(&audio)?;
         Ok(Self {
             params: Parameters::new(instance, sampler_parameters()),
@@ -447,7 +432,26 @@ impl Sampler {
     }
 }
 
-fn prepare_octaves(audio: &[Frame]) -> Result<Vec<Vec<Frame>>, String> {
+/// The stereo audio and sample rate held in sample state; no audio for empty state.
+pub(super) fn decode_audio(state: &[u8]) -> Result<(Vec<Frame>, u32), String> {
+    if state.is_empty() {
+        return Ok((Vec::new(), SAMPLE_RATE));
+    }
+    let sample = header(state)?;
+    if checksum(state) != sample.fingerprint {
+        return Err("Sampler state checksum mismatch".into());
+    }
+    let mut audio = Vec::new();
+    audio
+        .try_reserve_exact(sample.frames)
+        .map_err(|e| format!("Cannot allocate sample: {e}"))?;
+    for frame in sample.audio.as_chunks::<8>().0 {
+        audio.push(decode_frame(frame)?);
+    }
+    Ok((audio, sample.rate))
+}
+
+pub(super) fn prepare_octaves(audio: &[Frame]) -> Result<Vec<Vec<Frame>>, String> {
     let mut kernel = [0.0; 33];
     for (tap, value) in kernel.iter_mut().enumerate() {
         let distance = tap as f64 - 16.0;
@@ -498,12 +502,12 @@ fn bounds(params: &Parameters, len: usize) -> (usize, usize, usize, usize) {
 }
 
 #[derive(Debug)]
-struct Resampler {
+pub(super) struct Resampler {
     kernels: Vec<[f64; 16]>,
 }
 
 impl Resampler {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let mut kernels = Vec::with_capacity(9 * 129);
         for band in 0..9 {
             let cutoff = 0.95 * 2.0_f64.powi(-band);
@@ -526,7 +530,7 @@ impl Resampler {
         Self { kernels }
     }
 
-    fn interpolate_prepared(
+    pub(super) fn interpolate_prepared(
         &self,
         sources: (&[Frame], &[Vec<Frame>]),
         position: f64,

@@ -196,7 +196,7 @@ fn mono(frames: &[Frame]) -> Vec<f64> {
 }
 
 #[test]
-fn ladder_self_oscillates_near_its_cutoff() {
+fn filter_self_oscillates_near_its_cutoff() {
     let cutoff = 880.0;
     for quality in [RenderQuality::Realtime, RenderQuality::Offline] {
         let mut ferro = Ferro::new(
@@ -484,4 +484,88 @@ fn report_preset_levels() {
             );
         }
     }
+}
+
+/// The ratio of oscillator 1's pitch to oscillator 2's, and the voice's VCO levels,
+/// sampled once a second while a note is held.
+fn pitch_ratios(drift: f64) -> Vec<(f64, [f64; 3])> {
+    let mut ferro = Ferro::new(&instance(&[(DRIFT, drift)]), None);
+    render(
+        &mut ferro,
+        &[(0, on(1, 48, 0))],
+        4800,
+        256,
+        RenderQuality::Realtime,
+    );
+    (0..4)
+        .map(|_| {
+            render(&mut ferro, &[], 48_000, 256, RenderQuality::Realtime);
+            let voice = ferro.voices.iter().find(|voice| voice.gate).unwrap();
+            (voice.steps[0] / voice.steps[1], voice.amplitude)
+        })
+        .collect()
+}
+
+#[test]
+fn oscillators_drift_independently() {
+    let drifting = pitch_ratios(100.0);
+    let cents = |ratio: f64| 1200.0 * ratio.log2();
+    let spread = drifting
+        .iter()
+        .map(|(ratio, _)| cents(*ratio))
+        .fold((f64::MAX, f64::MIN), |(lo, hi), c| (lo.min(c), hi.max(c)));
+    assert!(
+        spread.1 - spread.0 > 0.5,
+        "oscillators 1 and 2 kept a fixed interval: {spread:?}"
+    );
+    assert!(
+        drifting
+            .iter()
+            .all(|(_, levels)| levels.iter().all(|l| (l - 1.0).abs() < 0.1))
+    );
+    assert!(
+        drifting
+            .iter()
+            .any(|(_, levels)| levels.iter().any(|l| (l - 1.0).abs() > 1e-3))
+    );
+
+    let stable = pitch_ratios(0.0);
+    assert!(stable.windows(2).all(|pair| pair[0].0 == pair[1].0));
+    assert!(stable.iter().all(|(_, levels)| *levels == [1.0; 3]));
+}
+
+#[test]
+fn chorus_hiss_dies_with_the_note() {
+    let mut ferro = Ferro::new(&instance(&[(AMP_RELEASE, 0.2), (CHORUS, 1.0)]), None);
+    let output = render(
+        &mut ferro,
+        &[(0, on(1, 60, 0)), (4800, NoteEvent::Off { id: 1 })],
+        4800 + 48_000,
+        256,
+        RenderQuality::Realtime,
+    );
+    assert!(peak(&output[4800 + 24_000..]) < 1.0e-4);
+}
+
+#[test]
+fn coupling_sags_the_tops_of_low_squares() {
+    // A 55 Hz square through the coupling capacitor, at the realtime oversampled rate.
+    let rate = RATE * 2.0;
+    let step = 55.0 / rate;
+    let coefficient = one_pole_coefficient(COUPLING_HZ, rate);
+    let mut vco = Vco::default();
+    let mut coupling = OnePole::default();
+    let period = (1.0 / step) as usize;
+    let mut cycle = Vec::new();
+    for n in 0..period * 40 {
+        let raw = vco.tick(3, step, 0.0);
+        let out = raw - coupling.lowpass(raw, coefficient);
+        if n >= period * 39 {
+            cycle.push(out);
+        }
+    }
+    // Within the high half, the level falls from just after the edge to just before it.
+    let high: Vec<f64> = cycle.iter().copied().filter(|v| *v > 0.0).collect();
+    let (first, last) = (high[4], high[high.len() - 5]);
+    assert!(first - last > 0.1 * first, "top went {first} → {last}");
 }

@@ -13,14 +13,15 @@ const FULL_SAMPLE: [(u32, f64); 4] = [(30, 0.0), (31, 1.0), (32, 0.0), (33, 1.0)
 impl SympoieApp {
     pub(super) fn load_sampler_sample(&mut self, id: u64) {
         use sympoie::builtin::BuiltinKind;
-        if !self.document.project().plugin(id).is_some_and(|plugin| {
-            BuiltinKind::from_descriptor(&plugin.descriptor) == Some(BuiltinKind::Sampler)
-        }) {
+        let Some(kind) = self.document.project().plugin(id).and_then(|plugin| {
+            BuiltinKind::from_descriptor(&plugin.descriptor)
+                .filter(|kind| matches!(kind, BuiltinKind::Sampler | BuiltinKind::Slicer))
+        }) else {
             return;
-        }
+        };
         self.release_preview_before_dialog();
         let Some(path) = rfd::FileDialog::new()
-            .set_title("Load Sampler Audio")
+            .set_title(format!("Load {} Audio", kind.name()))
             .add_filter("Audio", &audio_dialog_extensions())
             .pick_file()
         else {
@@ -72,29 +73,89 @@ impl SympoieApp {
         }
     }
 
-    /// Replaces the sample in the Sampler `id` with `path`, playing all of it.
+    /// Replaces the sample in the Sampler `id` with `path`, playing all of it; a Slicer
+    /// slices the new sample straight away with its detection settings.
     fn set_sampler_sample(&mut self, id: u64, path: &Path) {
-        use sympoie::builtin::instruments::sample_state_from_wav;
-        match sample_state_from_wav(path) {
-            Ok(state) => {
-                if self
-                    .edit_structural("Load Sampler Audio", |project| {
-                        project
-                            .set_plugin_state(id, state)
-                            .map_err(|e| e.to_string())?;
+        use sympoie::builtin::BuiltinKind;
+        use sympoie::builtin::instruments::{SliceSettings, analyze_slices, sample_state_from_wav};
+        let Some(plugin) = self.document.project().plugin(id) else {
+            return;
+        };
+        let kind = BuiltinKind::from_descriptor(&plugin.descriptor);
+        let settings = SliceSettings::of(plugin);
+        let state = match sample_state_from_wav(path) {
+            Ok(state) => state,
+            Err(error) => {
+                self.error(format!("Could not load sample: {error}"));
+                return;
+            }
+        };
+        let slices = if kind == Some(BuiltinKind::Slicer) {
+            match analyze_slices(&state, settings) {
+                Ok(starts) => Some(starts),
+                Err(error) => {
+                    self.error(format!("Could not slice sample: {error}"));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let device = kind.map_or("Sampler", BuiltinKind::name);
+        let label = format!("Load {device} Audio");
+        let count = slices.as_ref().map(Vec::len);
+        if self
+            .edit_structural(&label, |project| {
+                project
+                    .set_plugin_state(id, state)
+                    .map_err(|e| e.to_string())?;
+                match &slices {
+                    Some(starts) => edit::set_slices(project, id, starts)?,
+                    None => {
                         for (parameter, value) in FULL_SAMPLE {
                             project
                                 .set_plugin_parameter(id, parameter, value)
                                 .map_err(|e| e.to_string())?;
                         }
-                        Ok(())
+                    }
+                }
+                Ok(())
+            })
+            .is_some()
+        {
+            match count {
+                Some(count) => self.info(format!(
+                    "Loaded {} into Slicer as {count} slice{}",
+                    file_name(path),
+                    if count == 1 { "" } else { "s" }
+                )),
+                None => self.info(format!("Loaded {} into Sampler", file_name(path))),
+            }
+        }
+    }
+
+    /// Re-slices the sample in the Slicer `id` with its detection settings.
+    pub(super) fn analyze_slices(&mut self, id: u64) {
+        use sympoie::builtin::instruments::{SliceSettings, analyze_slices};
+        let Some(plugin) = self.document.project().plugin(id) else {
+            return;
+        };
+        match analyze_slices(&plugin.state, SliceSettings::of(plugin)) {
+            Ok(starts) => {
+                let count = starts.len();
+                if self
+                    .edit("Analyze Slices", |project| {
+                        edit::set_slices(project, id, &starts)
                     })
                     .is_some()
                 {
-                    self.info(format!("Loaded {} into Sampler", file_name(path)));
+                    self.info(format!(
+                        "Found {count} slice{}",
+                        if count == 1 { "" } else { "s" }
+                    ));
                 }
             }
-            Err(error) => self.error(format!("Could not load sample: {error}")),
+            Err(error) => self.error(format!("Could not slice sample: {error}")),
         }
     }
 

@@ -22,7 +22,9 @@ pub struct Inputs<'a> {
 }
 
 const KEYS_WIDTH: f32 = 180.0;
-const DISPLAY_WIDTH: f32 = 520.0;
+/// First-pass guess for the display well; after that it is fitted to its readouts.
+const DISPLAY_WIDTH: f32 = 560.0;
+const DISPLAY_PADDING: f32 = 10.0;
 const DRAG_PER_STEP: f32 = 8.0;
 
 pub fn show(ui: &mut Ui, inputs: &Inputs<'_>, meter: &mut MeterState, actions: &mut Vec<Action>) {
@@ -40,10 +42,14 @@ pub fn show(ui: &mut Ui, inputs: &Inputs<'_>, meter: &mut MeterState, actions: &
         egui::Stroke::new(1.0, theme::BORDER),
     );
     let keys = Rect::from_min_max(full.min, pos2(full.left() + KEYS_WIDTH, full.bottom()));
-    let display_left = (full.center().x - DISPLAY_WIDTH / 2.0).max(keys.right() + 12.0);
+    let width_id = Id::new("transport-display-width");
+    let display_width = ui
+        .data(|data| data.get_temp::<f32>(width_id))
+        .unwrap_or(DISPLAY_WIDTH);
+    let display_left = (full.center().x - display_width / 2.0).max(keys.right() + 12.0);
     let display = Rect::from_min_max(
         pos2(display_left, full.top() - 3.0),
-        pos2(display_left + DISPLAY_WIDTH, full.bottom() + 3.0),
+        pos2(display_left + display_width, full.bottom() + 3.0),
     );
     let right = Rect::from_min_max(pos2(display.right() + 12.0, full.top()), full.max);
 
@@ -56,12 +62,22 @@ pub fn show(ui: &mut Ui, inputs: &Inputs<'_>, meter: &mut MeterState, actions: &
         3.0,
         egui::Color32::from_rgb(0x0d, 0x0d, 0x0d),
     );
-    widgets::inside(
+    let content_width = widgets::inside(
         ui,
-        display.shrink2(vec2(10.0, 0.0)),
+        display.shrink2(vec2(DISPLAY_PADDING, 0.0)),
         Layout::left_to_right(Align::Center),
-        |ui| display_section(ui, inputs, actions),
+        |ui| {
+            display_section(ui, inputs, actions);
+            ui.min_rect().width()
+        },
     );
+    // The readouts don't fit a fixed width (the clock grows past ten minutes),
+    // so the well follows them, redrawing at once rather than overflowing.
+    let fitted = (content_width + 2.0 * DISPLAY_PADDING).ceil();
+    if (fitted - display_width).abs() > 0.5 {
+        ui.data_mut(|data| data.insert_temp(width_id, fitted));
+        ui.ctx().request_discard("transport display resized");
+    }
     analog::glass(ui.painter(), display.shrink(1.0));
     if right.width() > 60.0 {
         widgets::inside(ui, right, Layout::right_to_left(Align::Center), |ui| {

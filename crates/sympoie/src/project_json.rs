@@ -1243,7 +1243,7 @@ impl<'a> Loader<'a, '_> {
                     .find(|candidate| builtin_name(*candidate) == name)
                     .ok_or_else(|| {
                         builtin.error(
-                            "must be \"oscil\", \"sampler\", \"eq\", \"comp\", \"vari-mu\", \"rain\" or \"ferro\"",
+                            "must be \"oscil\", \"sampler\", \"slicer\", \"eq\", \"comp\", \"vari-mu\", \"rain\" or \"ferro\"",
                         )
                     })?;
                 let descriptor = builtin_kind.descriptor();

@@ -863,6 +863,24 @@ impl SympoieApp {
             Action::LoadSampleIntoSampler { path, track } => {
                 self.load_sample_into_sampler(&path, track);
             }
+            Action::SetSlices { id, starts, label } => {
+                self.edit(label, |project| edit::set_slices(project, id, &starts));
+            }
+            Action::AnalyzeSlices { id } => self.analyze_slices(id),
+            Action::AuditionInstrumentKey { id, key } => {
+                if let Some(track) = self.plugin_track(id) {
+                    self.sync_engine();
+                    self.engine.begin_audition_notes(
+                        track,
+                        vec![sympoie::clip::MidiNote::new(
+                            0,
+                            sympoie::TICKS_PER_QUARTER,
+                            key,
+                            100,
+                        )],
+                    );
+                }
+            }
             Action::ResetBuiltinParameters { id } => {
                 self.edit("Reset Device Controls", |project| {
                     let plugin = project.plugin(id).ok_or("Device no longer exists")?;
@@ -1172,7 +1190,7 @@ impl SympoieApp {
         }
     }
 
-    fn edit<T>(
+    pub(super) fn edit<T>(
         &mut self,
         label: &str,
         change: impl FnOnce(&mut Project) -> Result<T, String>,

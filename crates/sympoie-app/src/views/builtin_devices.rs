@@ -13,6 +13,7 @@ pub fn name(kind: BuiltinKind) -> &'static str {
     match kind {
         BuiltinKind::Oscil => "Oscil",
         BuiltinKind::Sampler => "Sampler",
+        BuiltinKind::Slicer => "Slicer",
         BuiltinKind::Eq => "EQ",
         BuiltinKind::Comp => "Comp",
         BuiltinKind::VariMu => "Vari-Mu",
@@ -25,6 +26,7 @@ pub fn editor_size(kind: BuiltinKind) -> [f32; 2] {
     match kind {
         BuiltinKind::Oscil => [700.0, 520.0],
         BuiltinKind::Sampler => [700.0, 410.0],
+        BuiltinKind::Slicer => [700.0, 440.0],
         BuiltinKind::Eq => [890.0, 450.0],
         BuiltinKind::Comp => [530.0, 330.0],
         BuiltinKind::VariMu => [720.0, 400.0],
@@ -37,6 +39,7 @@ pub fn minimum_editor_size(kind: BuiltinKind) -> [f32; 2] {
     match kind {
         BuiltinKind::Oscil => [690.0, 300.0],
         BuiltinKind::Sampler => [690.0, 300.0],
+        BuiltinKind::Slicer => [690.0, 320.0],
         BuiltinKind::Eq => [880.0, 300.0],
         BuiltinKind::Comp => [520.0, 300.0],
         BuiltinKind::VariMu => [600.0, 330.0],
@@ -49,6 +52,7 @@ pub fn accent(kind: BuiltinKind) -> Color32 {
     match kind {
         BuiltinKind::Oscil => theme::ACCENT,
         BuiltinKind::Sampler => Color32::from_rgb(113, 210, 184),
+        BuiltinKind::Slicer => Color32::from_rgb(236, 128, 160),
         BuiltinKind::Eq => Color32::from_rgb(114, 187, 239),
         BuiltinKind::Comp => Color32::from_rgb(208, 157, 238),
         BuiltinKind::VariMu => Color32::from_rgb(232, 168, 84),
@@ -139,7 +143,7 @@ fn display_spectrum(
 /// Whether the device has a full faceplate that opens in its own window; the others show
 /// all their controls on the rack card.
 pub fn has_panel(kind: BuiltinKind) -> bool {
-    kind == BuiltinKind::Ferro
+    matches!(kind, BuiltinKind::Ferro | BuiltinKind::Slicer)
 }
 
 /// Whether the device has a before/after scope window.
@@ -167,6 +171,7 @@ pub fn card_width(kind: BuiltinKind) -> f32 {
     match kind {
         BuiltinKind::Oscil => 428.0,
         BuiltinKind::Sampler => 424.0,
+        BuiltinKind::Slicer => 448.0,
         BuiltinKind::Eq => 460.0,
         BuiltinKind::Comp => 372.0,
         BuiltinKind::VariMu => 448.0,
@@ -786,6 +791,175 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn slicer_screen_auditions_adds_moves_and_removes_slices() {
+        use sympoie::builtin::instruments::{SLICE_BASE, SLICE_COUNT, slicer_parameters};
+        let path =
+            std::env::temp_dir().join(format!("sympoie-slicer-screen-{}.wav", std::process::id()));
+        std::fs::write(&path, mono_wav(&vec![0.5_f32; 9600])).unwrap();
+        let mut instance = BuiltinKind::Slicer.instance();
+        instance.id = 23;
+        instance.state = sympoie::builtin::instruments::sample_state_from_wav(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let specs = slicer_parameters();
+        for (id, value) in [(SLICE_COUNT, 2.0), (SLICE_BASE + 1, 0.5)] {
+            let spec = specs.iter().find(|spec| spec.id == id).unwrap();
+            instance
+                .parameters
+                .iter_mut()
+                .find(|p| p.id == id)
+                .unwrap()
+                .value = spec.normalize(value);
+        }
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut actions = Vec::new();
+        let mut time = 0.0;
+        let mut frame = |events, actions: &mut Vec<Action>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(700.0, 520.0))),
+                time: Some(time),
+                focused: true,
+                events,
+                ..Default::default()
+            };
+            time += 1.0 / 60.0;
+            let mut output = ctx.run_ui(raw, |ui| {
+                show(ui, &instance, BuiltinKind::Slicer, None, actions)
+            });
+            output.textures_delta.clear();
+        };
+        let button = |pos, button, pressed| egui::Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![], &mut actions);
+        frame(vec![], &mut actions);
+        assert!(actions.is_empty());
+        let body = ctx
+            .read_response(Id::new(("slicer-body", 23_u64)))
+            .unwrap()
+            .rect;
+        let at = |fraction: f32| pos2(body.left() + fraction * body.width(), body.center().y);
+
+        // Pressing the second slice plays its key until release.
+        frame(
+            vec![
+                egui::Event::PointerMoved(at(0.6)),
+                button(at(0.6), egui::PointerButton::Primary, true),
+            ],
+            &mut actions,
+        );
+        assert_eq!(actions, [Action::AuditionInstrumentKey { id: 23, key: 37 }]);
+        frame(
+            vec![button(at(0.6), egui::PointerButton::Primary, false)],
+            &mut actions,
+        );
+        assert_eq!(actions.last(), Some(&Action::ReleaseMidiAudition));
+
+        // Double-clicking cuts a new slice there, keeping slices in time order.
+        actions.clear();
+        for _ in 0..120 {
+            frame(vec![], &mut actions);
+        }
+        frame(vec![egui::Event::PointerMoved(at(0.25))], &mut actions);
+        for pressed in [true, false, true, false] {
+            frame(
+                vec![button(at(0.25), egui::PointerButton::Primary, pressed)],
+                &mut actions,
+            );
+        }
+        let added = actions
+            .iter()
+            .find_map(|action| match action {
+                Action::SetSlices {
+                    id: 23,
+                    starts,
+                    label: "Add Slice",
+                } => Some(starts.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("double-click adds a slice: {actions:?}"));
+        assert_eq!(added.len(), 3);
+        assert_eq!(added[0], 0.0);
+        assert!((added[1] - 0.25).abs() < 0.01, "{added:?}");
+        assert_eq!(added[2], 0.5);
+
+        // Dragging a flag moves that slice's start.
+        actions.clear();
+        let flag = ctx
+            .read_response(Id::new(("slicer-marker", 23_u64, 1_usize)))
+            .unwrap()
+            .rect
+            .center();
+        frame(
+            vec![
+                egui::Event::PointerMoved(flag),
+                button(flag, egui::PointerButton::Primary, true),
+            ],
+            &mut actions,
+        );
+        frame(
+            vec![egui::Event::PointerMoved(flag + vec2(60.0, 0.0))],
+            &mut actions,
+        );
+        frame(
+            vec![button(
+                flag + vec2(60.0, 0.0),
+                egui::PointerButton::Primary,
+                false,
+            )],
+            &mut actions,
+        );
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::SetVst3Parameter { id: 23, parameter: 101, value } if *value > 0.55
+        )));
+
+        // Right-clicking a flag removes its slice.
+        actions.clear();
+        frame(vec![egui::Event::PointerMoved(flag)], &mut actions);
+        frame(
+            vec![button(flag, egui::PointerButton::Secondary, true)],
+            &mut actions,
+        );
+        frame(
+            vec![button(flag, egui::PointerButton::Secondary, false)],
+            &mut actions,
+        );
+        assert_eq!(
+            actions,
+            [Action::SetSlices {
+                id: 23,
+                starts: vec![0.0],
+                label: "Remove Slice",
+            }]
+        );
+    }
+
+    /// A mono 48 kHz float WAV.
+    fn mono_wav(audio: &[f32]) -> Vec<u8> {
+        let data_len = audio.len() as u32 * 4;
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend((36 + data_len).to_le_bytes());
+        bytes.extend(b"WAVEfmt ");
+        bytes.extend(16_u32.to_le_bytes());
+        bytes.extend(3_u16.to_le_bytes());
+        bytes.extend(1_u16.to_le_bytes());
+        bytes.extend(48_000_u32.to_le_bytes());
+        bytes.extend((48_000_u32 * 4).to_le_bytes());
+        bytes.extend(4_u16.to_le_bytes());
+        bytes.extend(32_u16.to_le_bytes());
+        bytes.extend(b"data");
+        bytes.extend(data_len.to_le_bytes());
+        for sample in audio {
+            bytes.extend(sample.to_le_bytes());
+        }
+        bytes
     }
 
     #[test]

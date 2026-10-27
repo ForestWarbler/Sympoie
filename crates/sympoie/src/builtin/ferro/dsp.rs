@@ -1,5 +1,4 @@
-//! Building blocks of the Ferro voice: antialiased oscillators, the transistor-ladder
-//! filter, RC contour generators, oversampling decimators, drift, and the BBD chorus.
+//! Building blocks of the Ferro voice: antialiased oscillators, the IR3109 OTA filter, RC contour generators, oversampling decimators, drift, and the BBD chorus.
 
 use std::f64::consts::{PI, TAU};
 
@@ -77,20 +76,20 @@ fn pulse(phase: f64, step: f64, width: f64) -> f64 {
     raw + blep(phase, step) - blep((phase - width).rem_euclid(1.0), step) - (2.0 * width - 1.0)
 }
 
-/// One free-running VCO. Like the hardware it never resets its phase on a new note, so
-/// chords and repeated notes beat naturally against each other.
+/// One free-running oscillator, modelled on the Juno's DCO: an integrator ramps a
+/// capacitor and a switch resets it once per cycle, so the saw is a clean linear ramp and
+/// the pulses come from a comparator watching that ramp. Like the hardware it never
+/// resets its phase on a new note, so chords and repeated notes beat naturally against
+/// each other.
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct Vco {
     pub(super) phase: f64,
-    /// Output of the wave-shaping integrator that rounds the saw's ramp a little, the way
-    /// a real capacitor discharge does.
-    shape_state: f64,
 }
 
 impl Vco {
     /// Advances one sample at `step` cycles per sample and returns the wave. `width_mod`
-    /// shifts the pulse width (−0.5..0.5).
-    pub(super) fn tick(&mut self, wave: u32, step: f64, width_mod: f64, analog: bool) -> f64 {
+    /// shifts the comparator threshold, and so the pulse width (−0.5..0.5).
+    pub(super) fn tick(&mut self, wave: u32, step: f64, width_mod: f64) -> f64 {
         let step = step.clamp(0.0, 0.49);
         let phase = self.phase;
         let value = match wave {
@@ -108,16 +107,31 @@ impl Vco {
         if self.phase >= 1.0 {
             self.phase -= 1.0;
         }
-        if analog && wave == 2 {
-            // A gentle one-pole bow on the ramp (corner far above the note) gives the
-            // slightly curved, rounded saw of a discrete core.
-            let k = (step * 24.0).clamp(0.02, 1.0);
-            self.shape_state += (value - self.shape_state) * k;
-            0.85 * value + 0.15 * self.shape_state
-        } else {
-            value
-        }
+        value
     }
+}
+
+/// Corner of the coupling capacitor between each oscillator and the mixer. Being AC
+/// coupled, a square's flat tops sag toward zero and a saw's ramp bows slightly, most
+/// visibly on low notes.
+pub(super) const COUPLING_HZ: f64 = 5.0;
+
+/// The DCO's amplitude error at a pitch. The Juno scales the integrator's charge current
+/// with the note so every pitch reaches the same height, but the compensating DAC is
+/// coarse, so the level wobbles by a few percent from note to note. This is a smooth
+/// value noise over pitch (one random point per semitone), so glides move through it
+/// without stepping. Returns −1..1.
+pub(super) fn compensation_error(seed: u64, semitones: f64) -> f64 {
+    let point = |n: i64| {
+        let mut rng = Rng::new(seed ^ (n as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        rng.next_u64();
+        rng.bipolar()
+    };
+    let base = semitones.floor();
+    let t = semitones - base;
+    let t = t * t * (3.0 - 2.0 * t);
+    let a = point(base as i64);
+    a + (point(base as i64 + 1) - a) * t
 }
 
 /// Juno-style sub-oscillator: a square one octave below, phase-locked to its parent.
@@ -154,7 +168,7 @@ impl Pink {
 }
 
 // ---------------------------------------------------------------------------------------
-// Transistor ladder
+// IR3109 OTA filter
 // ---------------------------------------------------------------------------------------
 
 /// tanh(x)/x, the secant gain of a tanh stage, as a Padé approximation (good to a few
@@ -169,34 +183,45 @@ fn tanh_xdx_exact(x: f64) -> f64 {
     if x.abs() < 1.0e-6 { 1.0 } else { x.tanh() / x }
 }
 
-/// A four-pole transistor ladder in zero-delay-feedback form, with a tanh nonlinearity in
-/// every stage and in the feedback path.
+/// The Juno's IR3109: four OTA integrators in a cascade with resonance fed back from the
+/// last stage to the first, in zero-delay-feedback form.
 ///
-/// Each nonlinearity is replaced by its secant gain at an estimate of its input, which
-/// turns the loop into a linear system that is solved exactly per sample. Realtime mode
-/// takes the estimate from the filter's state (one solve, as in Mystran's cheap
-/// nonlinear ZDF). Offline mode then re-estimates from the solution and solves again until
-/// the outputs settle, so the nonlinear loop is resolved rather than approximated.
+/// Each stage is an OTA charging a capacitor, `y' = ωc·tanh(u − y)`: its differential pair
+/// sees the difference between its input and its own output, unlike a transistor ladder
+/// where every signal is shaped on its own. Ordinary levels pass almost cleanly, loud
+/// transients slew into a rounded overdrive, and the resonance swells into a smooth,
+/// sine-like self-oscillation.
+///
+/// Each tanh is replaced by its secant gain at an estimate of its input, which turns the
+/// loop into a linear system that is solved exactly per sample. Realtime mode takes the
+/// estimate from the filter's state (one solve, as in Mystran's cheap nonlinear ZDF).
+/// Offline mode then re-estimates from the solution and solves again until the outputs
+/// settle, so the nonlinear loop is resolved rather than approximated.
 #[derive(Debug, Clone, Copy, Default)]
-pub(super) struct Ladder {
+pub(super) struct Ir3109 {
     s: [f64; 4],
     last_input: f64,
 }
 
-pub(super) struct LadderSolve {
+/// Linear range of each OTA stage, in the voice's signal units.
+const STAGE_HEADROOM: f64 = 2.0;
+/// Level at which the resonance feedback saturates.
+const FEEDBACK_LIMIT: f64 = 2.0;
+
+pub(super) struct FilterSolve {
     pub(super) iterations: usize,
     pub(super) tolerance: f64,
     pub(super) exact: bool,
 }
 
-impl Ladder {
+impl Ir3109 {
     pub(super) fn reset(&mut self) {
         *self = Self::default();
     }
 
     /// `g` is the prewarped integrator gain tan(π·fc/fs); `k` is the feedback, where 4
     /// is the edge of self-oscillation.
-    pub(super) fn tick(&mut self, input: f64, g: f64, k: f64, solve: &LadderSolve) -> f64 {
+    pub(super) fn tick(&mut self, input: f64, g: f64, k: f64, solve: &FilterSolve) -> f64 {
         let t = if solve.exact {
             tanh_xdx_exact
         } else {
@@ -207,29 +232,30 @@ impl Ladder {
         let x = 0.5 * (input + self.last_input);
         self.last_input = input;
         let s = self.s;
-        let mut estimate = [x - k * s[3], s[0], s[1], s[2], s[3]];
-        let mut y = [0.0; 4];
-        let mut xx = 0.0;
+        // A trapezoidal OTA stage with secant gain t is a linear one-pole with gain g·t:
+        // y = G·u + S, where G = g·t / (1 + g·t) and S = s / (1 + g·t).
+        let mut y = s;
         for pass in 0..solve.iterations.max(1) {
-            let t0 = t(estimate[0]);
-            let t1 = t(estimate[1]);
-            let t2 = t(estimate[2]);
-            let t3 = t(estimate[3]);
-            let t4 = t(estimate[4]);
-            let g0 = 1.0 / (1.0 + g * t1);
-            let g1 = 1.0 / (1.0 + g * t2);
-            let g2 = 1.0 / (1.0 + g * t3);
-            let g3 = 1.0 / (1.0 + g * t4);
-            let f3 = g * t3 * g3;
-            let f2 = g * t2 * g2 * f3;
-            let f1 = g * t1 * g1 * f2;
-            let f0 = g * t0 * g0 * f1;
-            let y3 = (g3 * s[3] + f3 * g2 * s[2] + f2 * g1 * s[1] + f1 * g0 * s[0] + f0 * x)
-                / (1.0 + k * f0);
-            xx = t0 * (x - k * y3);
-            let y0 = t1 * g0 * (s[0] + g * xx);
-            let y1 = t2 * g1 * (s[1] + g * y0);
-            let y2 = t3 * g2 * (s[2] + g * y1);
+            // The resonance returns through its own limiting gain stage, which caps how
+            // hard the feedback can push the first OTA and keeps self-oscillation in tune.
+            let kf = k * t(k * y[3] / FEEDBACK_LIMIT);
+            let u0 = x - kf * y[3];
+            let differences = [u0 - y[0], y[0] - y[1], y[1] - y[2], y[2] - y[3]];
+            let mut gains = [0.0; 4];
+            let mut offsets = [0.0; 4];
+            for i in 0..4 {
+                let gt = g * t(differences[i] / STAGE_HEADROOM);
+                gains[i] = gt / (1.0 + gt);
+                offsets[i] = s[i] / (1.0 + gt);
+            }
+            let [g0, g1, g2, g3] = gains;
+            let [o0, o1, o2, o3] = offsets;
+            let through = g0 * g1 * g2 * g3;
+            let rest = g3 * (g2 * (g1 * o0 + o1) + o2) + o3;
+            let y3 = (through * x + rest) / (1.0 + kf * through);
+            let y0 = g0 * (x - kf * y3) + o0;
+            let y1 = g1 * y0 + o1;
+            let y2 = g2 * y1 + o2;
             let next = [y0, y1, y2, y3];
             let settled = pass > 0
                 && next
@@ -237,18 +263,12 @@ impl Ladder {
                     .zip(&y)
                     .all(|(a, b)| (a - b).abs() <= solve.tolerance);
             y = next;
-            estimate = [x - k * y3, y0, y1, y2, y3];
             if settled {
                 break;
             }
         }
-        let t4 = t(estimate[4]);
-        let t3 = t(estimate[3]);
-        self.s[0] += 2.0 * g * (xx - y[0]);
-        self.s[1] += 2.0 * g * (y[0] - y[1]);
-        self.s[2] += 2.0 * g * (y[1] - y[2]);
-        self.s[3] += 2.0 * g * (t3 * y[2] - t4 * y[3]);
-        for state in &mut self.s {
+        for (state, output) in self.s.iter_mut().zip(y) {
+            *state = 2.0 * output - *state;
             // Flush denormals, and recover from anything non-finite.
             if !state.is_finite() || state.abs() < 1.0e-20 {
                 *state = 0.0;
@@ -259,7 +279,7 @@ impl Ladder {
 }
 
 /// Prewarped integrator gain for a cutoff at `rate`.
-pub(super) fn ladder_gain(cutoff: f64, rate: f64) -> f64 {
+pub(super) fn filter_gain(cutoff: f64, rate: f64) -> f64 {
     (PI * cutoff.clamp(5.0, rate * 0.45) / rate).tan()
 }
 
@@ -627,8 +647,10 @@ pub const CHORUS_MODES: [&str; 4] = ["Off", "I", "II", "I+II"];
 
 /// A model of the Juno's bucket-brigade stereo chorus: a mono voice feeds one delay
 /// line tapped by two triangle-modulated readers in antiphase. Each tap goes through the
-/// BBD's band-limiting filters and a little companding grit. Offline renders read the
-/// moving taps with cubic rather than linear interpolation.
+/// BBD's band-limiting filters and a little companding grit. The line adds hiss, which
+/// the compander's expander pulls down with the signal, so it breathes with the music and
+/// is gone in silence. Offline renders read the moving taps with cubic rather than linear
+/// interpolation.
 #[derive(Debug, Clone)]
 pub(super) struct Chorus {
     buffer: Vec<f64>,
@@ -637,11 +659,17 @@ pub(super) struct Chorus {
     pre: Svf,
     post: [Svf; 2],
     level: f64,
+    /// The compander's envelope of the input, which sets how much hiss survives.
+    envelope: f64,
+    rng: Rng,
     /// The last mode that was on, so switching off fades out the sound that was playing.
     voiced: u32,
 }
 
 const CHORUS_BUFFER: usize = 1024;
+/// BBD hiss relative to the signal envelope, about −50 dB under the music.
+const CHORUS_HISS: f64 = 0.003;
+const CHORUS_SEED: u64 = 0x6262_645f_6869_7373;
 
 impl Chorus {
     pub(super) fn new() -> Self {
@@ -652,6 +680,8 @@ impl Chorus {
             pre: Svf::default(),
             post: [Svf::default(); 2],
             level: 0.0,
+            envelope: 0.0,
+            rng: Rng::new(CHORUS_SEED),
             voiced: 1,
         }
     }
@@ -665,6 +695,8 @@ impl Chorus {
             filter.reset();
         }
         self.level = 0.0;
+        self.envelope = 0.0;
+        self.rng = Rng::new(CHORUS_SEED);
     }
 
     fn read(&self, delay: f64, exact: bool) -> f64 {
@@ -704,7 +736,15 @@ impl Chorus {
         let filtered = self.pre.lowpass(input, g, 1.2);
         // Mild BBD companding: the expander undoes most of the compressor, but not all.
         let filtered = filtered - 0.05 * filtered * filtered * filtered;
-        self.buffer[self.write] = filtered;
+        let magnitude = filtered.abs();
+        let speed = if magnitude > self.envelope {
+            one_pole_coefficient(200.0, rate)
+        } else {
+            one_pole_coefficient(3.0, rate)
+        };
+        self.envelope += (magnitude - self.envelope) * speed;
+        let hiss = self.rng.bipolar() * CHORUS_HISS * self.envelope;
+        self.buffer[self.write] = filtered + hiss;
         self.lfo = (self.lfo + hz / rate).fract();
         let triangle = 1.0 - 4.0 * (self.lfo - 0.5).abs();
         let mut out = [0.0; 2];

@@ -7,9 +7,17 @@ use crate::{Frame, SAMPLE_RATE};
 use super::{ParameterSpec, Scale};
 
 mod sampler;
+mod slicer;
 pub use sampler::{
     SamplePreview, create_sampler, sample_preview, sample_state_fingerprint, sample_state_from_wav,
     sampler_note_tail_frames, sampler_note_tail_frames_with_automation,
+};
+pub use slicer::{
+    MAX_SLICES, SLICE_BASE, SLICE_CHOKE, SLICE_COUNT, SLICE_CUTOFF, SLICE_DETECT, SLICE_DETECTORS,
+    SLICE_DIVISIONS, SLICE_FADE, SLICE_MIN_LENGTH, SLICE_MODE, SLICE_RESONANCE, SLICE_REVERSE,
+    SLICE_ROOT, SLICE_SENSITIVITY, SLICE_TRANSPOSE, SLICE_TUNE, SliceDetection, SliceSettings,
+    analyze_slices, create_slicer, detect_slices, slice_regions, slice_starts,
+    slicer_note_tail_frames_with_automation, slicer_parameters,
 };
 
 pub const GAIN: u32 = 0;
@@ -667,6 +675,17 @@ impl Envelope {
         if self.stage != Stage::Silent && self.stage != Stage::Release {
             self.stage = Stage::Release;
             self.release_step = self.level / (seconds * f64::from(SAMPLE_RATE)).max(1.0);
+        }
+    }
+    /// Fades the note out within `seconds`, sooner than its own release would.
+    fn choke(&mut self, seconds: f64) {
+        if self.stage == Stage::Silent {
+            return;
+        }
+        let step = self.level / (seconds * f64::from(SAMPLE_RATE)).max(1.0);
+        if self.stage != Stage::Release || step > self.release_step {
+            self.stage = Stage::Release;
+            self.release_step = step;
         }
     }
     fn next(&mut self, settings: EnvelopeSettings) -> f64 {

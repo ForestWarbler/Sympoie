@@ -275,6 +275,11 @@ or track name; leave it out for the default label.
   the track's notes in the background with the slower, more accurate offline
   engine and plays that render. Bounce and export always use the offline
   engine.
+- **Slicer slices.** Slices (parameter 50) says how many slices are active;
+  slice n (counting from 0) starts at parameter 100 + n, as a fraction of the
+  whole sample from 0 to 1, and ends where the next later slice starts. Slice
+  n plays on key Root key (parameter 20) + n, so keep starts in ascending
+  order to keep the keys in time order. The sample itself is loaded in Sympoie.
 - **IDs are permanent.** Keep existing `id`s exactly. Leave `id` out of new
   tracks, clips and devices and Sympoie assigns one. Never reuse an ID.
 - **References use track IDs**, never positions: an `output` of
