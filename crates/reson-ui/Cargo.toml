@@ -1,0 +1,17 @@
+[package]
+name = "sympoie-reson-ui"
+description = "Reson's graphite interface, shared by Sympoie and the Reson plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+egui = { version = "0.36.1", default-features = false }
+sympoie-reson = { path = "../reson" }
+
+[lints]
+workspace = true

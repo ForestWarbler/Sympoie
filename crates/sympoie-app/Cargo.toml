@@ -20,6 +20,8 @@ glow = ["eframe/glow"]
 
 [dependencies]
 sympoie = { path = "../sympoie" }
+sympoie-calor-ui = { path = "../calor-ui" }
+sympoie-reson-ui = { path = "../reson-ui" }
 eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts", "wayland", "wgpu", "x11"] }
 rfd = "0.17.2"
 cpal = { version = "0.18.2", optional = true }

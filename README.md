@@ -63,6 +63,28 @@ The optimized binary is written to `target/release/sympoie` (`sympoie.exe` on Wi
 
 Always judge performance with `--release`. A plain `cargo run` makes a debug build, which is slower to draw. The engine and dependencies are optimized even in debug builds, so a debug build is still fine for day-to-day development.
 
+### Build the Reson plugin
+
+Reson, Sympoie's resonance suppressor, also runs in other hosts as a VST3 and CLAP plugin, with the same sound and the same interface.
+
+```sh
+python3 tools/bundle_reson.py            # writes target/bundled/Reson.vst3 and Reson.clap
+python3 tools/bundle_reson.py --install  # and copies them into your plug-in folders
+```
+
+On macOS, `--universal` builds one bundle for both Apple Silicon and Intel Macs; it needs `rustup target add aarch64-apple-darwin x86_64-apple-darwin`.
+
+### Build the Calor plugin
+
+Calor, Sympoie's harmonic saturator, ships the same way. It splits its curve into odd and even harmonics you can set apart, across up to six bands. Each band has its own model (Curve, Tube, Tape, Transformer or Fold), dynamics, feedback and mid/side, and an LFO and an envelope follower can move them.
+
+```sh
+python3 tools/bundle_calor.py            # writes target/bundled/Calor.vst3 and Calor.clap
+python3 tools/bundle_calor.py --install  # and copies them into your plug-in folders
+```
+
+It takes the same options as `bundle_reson.py`.
+
 ### Develop
 
 ```sh
@@ -78,7 +100,7 @@ Useful environment variables:
 | `SYMPOIE_NO_AUDIO=1` | Start without opening an audio device (also used by the tests) |
 | `SYMPOIE_RENDERER=glow` | Draw with OpenGL instead of wgpu (needs `--features glow`) |
 
-The workspace has two crates: `crates/sympoie` is the audio engine, project model and file formats, and `crates/sympoie-app` is the application and its interface.
+The workspace's main crates are `crates/sympoie`, the audio engine, project model and file formats, and `crates/sympoie-app`, the application and its interface. Reson and Calor each live in three crates of their own so they can also ship as plugins: `crates/reson` and `crates/calor` are their sound processing, `crates/reson-ui` and `crates/calor-ui` their interfaces, and `crates/reson-plugin` and `crates/calor-plugin` the VST3 and CLAP wrappers.
 
 ## Why I built Sympoie
 

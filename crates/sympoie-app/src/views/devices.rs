@@ -1006,6 +1006,20 @@ fn builtin_card(
                             inline_sidechain_button(ui, project, runtime, track, plugin, actions)
                         });
                     }
+                    let latency = sympoie::builtin::latency_samples(kind);
+                    if latency > 0 {
+                        let note = ui.painter().text(
+                            pos2(controls_left - 6.0, title.center().y + 1.0),
+                            Align2::RIGHT_CENTER,
+                            format!(
+                                "{:.1} ms",
+                                f64::from(latency) * 1000.0 / f64::from(sympoie::SAMPLE_RATE)
+                            ),
+                            theme::prop(9.0),
+                            rack::INK_FAINT,
+                        );
+                        controls_left = note.left() - 2.0;
+                    }
                     let handle = ui.interact(
                         Rect::from_min_max(
                             title.min + vec2(23.0, 0.0),

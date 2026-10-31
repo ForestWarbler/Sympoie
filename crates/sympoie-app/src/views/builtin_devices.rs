@@ -19,6 +19,8 @@ pub fn name(kind: BuiltinKind) -> &'static str {
         BuiltinKind::VariMu => "Vari-Mu",
         BuiltinKind::Rain => "Rain",
         BuiltinKind::Ferro => "Ferro",
+        BuiltinKind::Reson => "Reson",
+        BuiltinKind::Calor => "Calor",
     }
 }
 
@@ -32,6 +34,8 @@ pub fn editor_size(kind: BuiltinKind) -> [f32; 2] {
         BuiltinKind::VariMu => [720.0, 400.0],
         BuiltinKind::Rain => [700.0, 520.0],
         BuiltinKind::Ferro => [1180.0, 440.0],
+        BuiltinKind::Reson => [900.0, 500.0],
+        BuiltinKind::Calor => [900.0, 500.0],
     }
 }
 
@@ -45,6 +49,8 @@ pub fn minimum_editor_size(kind: BuiltinKind) -> [f32; 2] {
         BuiltinKind::VariMu => [600.0, 330.0],
         BuiltinKind::Rain => [690.0, 300.0],
         BuiltinKind::Ferro => [826.0, 308.0],
+        BuiltinKind::Reson => [630.0, 350.0],
+        BuiltinKind::Calor => [630.0, 350.0],
     }
 }
 
@@ -58,6 +64,8 @@ pub fn accent(kind: BuiltinKind) -> Color32 {
         BuiltinKind::VariMu => Color32::from_rgb(232, 168, 84),
         BuiltinKind::Rain => Color32::from_rgb(104, 192, 234),
         BuiltinKind::Ferro => Color32::from_rgb(255, 166, 56),
+        BuiltinKind::Reson => Color32::from_rgb(190, 224, 92),
+        BuiltinKind::Calor => Color32::from_rgb(255, 143, 69),
     }
 }
 
@@ -115,13 +123,13 @@ const SPECTRUM_FADE: f64 = 0.5;
 /// A telemetry spectrum ready to draw. Devices keep their spectra through resets (the engine
 /// resets them at every loop wrap), so when refreshes stop because playback stopped the
 /// display fades to `floor` instead of freezing, like an analyzer hearing silence.
-fn display_spectrum(
+fn display_spectrum<const BANDS: usize>(
     ui: &Ui,
     id: Id,
     telemetry: &Telemetry,
-    bands: &[std::sync::atomic::AtomicU32; 128],
+    bands: &[std::sync::atomic::AtomicU32; BANDS],
     floor: f32,
-) -> [f32; 128] {
+) -> [f32; BANDS] {
     let now = ui.input(|input| input.time);
     let updates = telemetry.spectrum_updates.load(Ordering::Relaxed);
     let key = id.with("spectrum-age");
@@ -143,7 +151,10 @@ fn display_spectrum(
 /// Whether the device has a full faceplate that opens in its own window; the others show
 /// all their controls on the rack card.
 pub fn has_panel(kind: BuiltinKind) -> bool {
-    matches!(kind, BuiltinKind::Ferro | BuiltinKind::Slicer)
+    matches!(
+        kind,
+        BuiltinKind::Ferro | BuiltinKind::Slicer | BuiltinKind::Reson | BuiltinKind::Calor
+    )
 }
 
 /// Whether the device has a before/after scope window.
@@ -177,6 +188,8 @@ pub fn card_width(kind: BuiltinKind) -> f32 {
         BuiltinKind::VariMu => 448.0,
         BuiltinKind::Rain => 428.0,
         BuiltinKind::Ferro => 448.0,
+        BuiltinKind::Reson => 460.0,
+        BuiltinKind::Calor => 460.0,
     }
 }
 
@@ -199,7 +212,10 @@ pub fn show(
     telemetry: Option<&Telemetry>,
     actions: &mut Vec<Action>,
 ) {
-    if !matches!(kind, BuiltinKind::VariMu | BuiltinKind::Ferro) {
+    if !matches!(
+        kind,
+        BuiltinKind::VariMu | BuiltinKind::Ferro | BuiltinKind::Reson | BuiltinKind::Calor
+    ) {
         let plate = ui.max_rect().expand(8.0).intersect(ui.clip_rect());
         ui.painter()
             .add(rack::faceplate(plate, Some(accent(kind)), false));
@@ -209,7 +225,12 @@ pub fn show(
     });
     if matches!(
         kind,
-        BuiltinKind::Eq | BuiltinKind::Comp | BuiltinKind::VariMu | BuiltinKind::Rain
+        BuiltinKind::Eq
+            | BuiltinKind::Comp
+            | BuiltinKind::VariMu
+            | BuiltinKind::Rain
+            | BuiltinKind::Reson
+            | BuiltinKind::Calor
     ) {
         ui.ctx().request_repaint_after(Duration::from_millis(33));
     }

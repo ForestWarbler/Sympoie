@@ -6,10 +6,14 @@ const BODY_HEIGHT: f32 = 172.0;
 
 const GAP: f32 = 4.0;
 
+#[path = "builtin_calor.rs"]
+mod calor;
 #[path = "builtin_ferro.rs"]
 mod ferro;
 #[path = "builtin_rain.rs"]
 mod rain;
+#[path = "builtin_reson.rs"]
+mod reson;
 #[path = "builtin_slicer.rs"]
 mod slicer;
 #[path = "builtin_varimu.rs"]
@@ -48,10 +52,17 @@ pub(super) fn show(
         BuiltinKind::VariMu => varimu::compact(ui, &mut deck, telemetry),
         BuiltinKind::Rain => rain::compact(ui, &mut deck, telemetry),
         BuiltinKind::Ferro => ferro::compact(ui, &mut deck, telemetry),
+        BuiltinKind::Reson => reson::compact(ui, &mut deck, telemetry),
+        BuiltinKind::Calor => calor::compact(ui, &mut deck, telemetry),
     }
     if matches!(
         kind,
-        BuiltinKind::Eq | BuiltinKind::Comp | BuiltinKind::VariMu | BuiltinKind::Rain
+        BuiltinKind::Eq
+            | BuiltinKind::Comp
+            | BuiltinKind::VariMu
+            | BuiltinKind::Rain
+            | BuiltinKind::Reson
+            | BuiltinKind::Calor
     ) {
         ui.ctx().request_repaint_after(Duration::from_millis(33));
     }
@@ -236,6 +247,8 @@ fn compact_value(spec: &ParameterSpec, value: f64) -> String {
         "dB" => format!("{value:.1}dB"),
         "cent" => format!("{value:.0}ct"),
         "st" => format!("{value:.0}st"),
+        // A range of less than an octave needs the finer steps.
+        "oct" if spec.max < 1.0 => format!("{value:.2}oct"),
         "oct" => format!("{value:.1}oct"),
         "MIDI" => format!("{value:.0}"),
         "%" => format!("{value:.0}%"),
@@ -890,6 +903,14 @@ pub(super) fn editor(
         ferro::editor(ui, &mut deck, telemetry);
         return;
     }
+    if kind == BuiltinKind::Reson {
+        reson::editor(ui, &mut deck, telemetry);
+        return;
+    }
+    if kind == BuiltinKind::Calor {
+        calor::editor(ui, &mut deck, telemetry);
+        return;
+    }
     ui.spacing_mut().item_spacing = vec2(SECTION_GAP, SECTION_GAP);
     header(ui, &mut deck, kind);
     egui::ScrollArea::both()
@@ -904,8 +925,11 @@ pub(super) fn editor(
                 BuiltinKind::Eq => eq_editor(ui, &mut deck, telemetry),
                 BuiltinKind::Comp => comp_editor(ui, &mut deck, telemetry),
                 BuiltinKind::Rain => rain::editor(ui, &mut deck, telemetry),
-                BuiltinKind::VariMu | BuiltinKind::Ferro => {
-                    unreachable!("the Vari-Mu and Ferro draw their own faceplates")
+                BuiltinKind::VariMu
+                | BuiltinKind::Ferro
+                | BuiltinKind::Reson
+                | BuiltinKind::Calor => {
+                    unreachable!("the Vari-Mu, Ferro, Reson and Calor draw their own faceplates")
                 }
             }
         });
@@ -948,6 +972,8 @@ fn header(ui: &mut Ui, deck: &mut Deck, kind: BuiltinKind) {
                 BuiltinKind::VariMu => "Variable-mu tube compressor",
                 BuiltinKind::Rain => "Random arpeggiator with a soft synth",
                 BuiltinKind::Ferro => "Analog synthesizer",
+                BuiltinKind::Reson => "Resonance suppressor",
+                BuiltinKind::Calor => "Harmonic saturator",
             };
             let (rect, _) = ui.allocate_exact_size(vec2(200.0, 10.0), Sense::hover());
             rack::print(
@@ -966,7 +992,10 @@ fn header(ui: &mut Ui, deck: &mut Deck, kind: BuiltinKind) {
                 }
                 BuiltinKind::Eq => &[(31, "Mix"), (30, "Output")],
                 BuiltinKind::Comp => &[(7, "Output"), (6, "Mix"), (5, "Makeup")],
-                BuiltinKind::VariMu | BuiltinKind::Ferro => &[],
+                BuiltinKind::VariMu
+                | BuiltinKind::Ferro
+                | BuiltinKind::Reson
+                | BuiltinKind::Calor => &[],
                 BuiltinKind::Rain => &[(0, "Gain")],
             };
             for &(id, label) in output {
@@ -1331,7 +1360,11 @@ mod tests {
                 BuiltinKind::Slicer => 1,
                 BuiltinKind::Eq => 6,
                 BuiltinKind::Rain => 3,
-                BuiltinKind::Comp | BuiltinKind::VariMu | BuiltinKind::Ferro => 1,
+                BuiltinKind::Comp
+                | BuiltinKind::VariMu
+                | BuiltinKind::Ferro
+                | BuiltinKind::Reson
+                | BuiltinKind::Calor => 1,
             };
             let mut reachable = std::collections::BTreeSet::new();
             for tab in 0..page_count {

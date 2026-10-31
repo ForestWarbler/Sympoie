@@ -223,3 +223,115 @@ fn one_shot_sample_export_includes_playback_after_short_midi_gate() {
             .all(|sample| sample.abs() < 1e-6)
     );
 }
+
+#[test]
+fn reson_latency_is_compensated_against_an_unprocessed_track() {
+    use sympoie::builtin::reson;
+    use sympoie::clip::AudioClip;
+    use sympoie::project::AudioBuffer;
+
+    // Two tracks play the same audio; one passes through a Reson with nothing to cut,
+    // which only delays it. Delay compensation lines them up again.
+    let mut project = Project::new();
+    project.set_bpm(3000.0).unwrap();
+    let source: Vec<_> = (0..4096)
+        .map(|i| {
+            [
+                ((i * 17) % 101) as f32 / 256.0,
+                ((i * 29) % 97) as f32 / -256.0,
+            ]
+        })
+        .collect();
+    let asset = project.add_asset(AudioBuffer::new(source.clone()).unwrap());
+    let mut tracks = Vec::new();
+    for name in ["Dry", "Through Reson"] {
+        let track = project.add_audio_track(name);
+        project
+            .add_audio_clip(
+                track,
+                AudioClip {
+                    asset,
+                    source_start: 0,
+                    start_tick: 0,
+                    frame_count: source.len() as u64,
+                    gain: 1.0,
+                    pitch_semitones: 0.0,
+                    pitch_algorithm: Default::default(),
+                    preserve_formants: false,
+                    name: None,
+                },
+            )
+            .unwrap();
+        tracks.push(track);
+    }
+    let mut instance = BuiltinKind::Reson.instance();
+    instance.parameters[reson::DEPTH as usize].value = 0.0;
+    project.add_effect(tracks[1].into(), instance).unwrap();
+    let mut renderer = Renderer::new(&project).unwrap();
+    assert_eq!(renderer.latency_frames(), u64::from(reson::LATENCY));
+    let mut audio = vec![[0.0; 2]; source.len()];
+    for (index, block) in audio.chunks_mut(53).enumerate() {
+        renderer.render_block((index * 53) as u64, block);
+    }
+    for (rendered, original) in audio.iter().zip(&source) {
+        for channel in 0..2 {
+            assert!((rendered[channel] - 2.0 * original[channel]).abs() < 1.0e-5);
+        }
+    }
+}
+
+#[test]
+fn calor_latency_is_compensated_against_an_unprocessed_track() {
+    use sympoie::builtin::calor;
+    use sympoie::clip::AudioClip;
+    use sympoie::project::AudioBuffer;
+
+    // Two tracks play the same audio; one passes through a Calor with Mix at 0, which only
+    // delays it. Delay compensation lines them up again.
+    let mut project = Project::new();
+    project.set_bpm(3000.0).unwrap();
+    let source: Vec<_> = (0..4096)
+        .map(|i| {
+            [
+                ((i * 13) % 89) as f32 / 256.0,
+                ((i * 31) % 83) as f32 / -256.0,
+            ]
+        })
+        .collect();
+    let asset = project.add_asset(AudioBuffer::new(source.clone()).unwrap());
+    let mut tracks = Vec::new();
+    for name in ["Dry", "Through Calor"] {
+        let track = project.add_audio_track(name);
+        project
+            .add_audio_clip(
+                track,
+                AudioClip {
+                    asset,
+                    source_start: 0,
+                    start_tick: 0,
+                    frame_count: source.len() as u64,
+                    gain: 1.0,
+                    pitch_semitones: 0.0,
+                    pitch_algorithm: Default::default(),
+                    preserve_formants: false,
+                    name: None,
+                },
+            )
+            .unwrap();
+        tracks.push(track);
+    }
+    let mut instance = BuiltinKind::Calor.instance();
+    instance.parameters[calor::MIX as usize].value = 0.0;
+    project.add_effect(tracks[1].into(), instance).unwrap();
+    let mut renderer = Renderer::new(&project).unwrap();
+    assert_eq!(renderer.latency_frames(), u64::from(calor::LATENCY));
+    let mut audio = vec![[0.0; 2]; source.len()];
+    for (index, block) in audio.chunks_mut(53).enumerate() {
+        renderer.render_block((index * 53) as u64, block);
+    }
+    for (rendered, original) in audio.iter().zip(&source) {
+        for channel in 0..2 {
+            assert!((rendered[channel] - 2.0 * original[channel]).abs() < 1.0e-5);
+        }
+    }
+}

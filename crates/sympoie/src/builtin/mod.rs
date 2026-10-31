@@ -1,7 +1,9 @@
+pub mod calor;
 pub mod effects;
 pub mod ferro;
 pub mod instruments;
 pub mod rain;
+pub mod reson;
 pub mod varimu;
 
 use std::sync::Arc;
@@ -22,10 +24,12 @@ pub enum BuiltinKind {
     VariMu,
     Rain,
     Ferro,
+    Reson,
+    Calor,
 }
 
 impl BuiltinKind {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 10] = [
         Self::Oscil,
         Self::Sampler,
         Self::Slicer,
@@ -34,6 +38,8 @@ impl BuiltinKind {
         Self::VariMu,
         Self::Rain,
         Self::Ferro,
+        Self::Reson,
+        Self::Calor,
     ];
 
     pub fn name(self) -> &'static str {
@@ -46,6 +52,8 @@ impl BuiltinKind {
             Self::VariMu => "Vari-Mu",
             Self::Rain => "Rain",
             Self::Ferro => "Ferro",
+            Self::Reson => "Reson",
+            Self::Calor => "Calor",
         }
     }
 
@@ -209,6 +217,8 @@ pub fn choices(kind: BuiltinKind, id: u32) -> Option<&'static [&'static str]> {
             _ => None,
         },
         BuiltinKind::Ferro => ferro::choices(id),
+        BuiltinKind::Reson => reson::choices(id),
+        BuiltinKind::Calor => calor::choices(id),
     };
     named.or_else(|| (spec.steps == 1 && spec.min == 0.0 && spec.max == 1.0).then_some(&SWITCH[..]))
 }
@@ -223,6 +233,17 @@ pub fn parameters(kind: BuiltinKind) -> Vec<ParameterSpec> {
         BuiltinKind::VariMu => varimu::parameters(),
         BuiltinKind::Rain => rain::parameters(),
         BuiltinKind::Ferro => ferro::parameters(),
+        BuiltinKind::Reson => reson::parameters(),
+        BuiltinKind::Calor => calor::parameters(),
+    }
+}
+
+/// Samples by which a built-in device delays its signal, for delay compensation.
+pub fn latency_samples(kind: BuiltinKind) -> u32 {
+    match kind {
+        BuiltinKind::Reson => reson::LATENCY,
+        BuiltinKind::Calor => calor::LATENCY,
+        _ => 0,
     }
 }
 
@@ -341,6 +362,10 @@ pub struct Telemetry {
     pub spectrum: [AtomicU32; 128],
     /// Spectrum of the device's input, for devices that compare before and after.
     pub input_spectrum: [AtomicU32; 128],
+    /// Reson's spectra, cuts, notes and meters, which its own interface draws.
+    pub reson: Arc<reson::ResonTelemetry>,
+    /// Calor's meters, which its own interface draws.
+    pub calor: Arc<calor::CalorTelemetry>,
     /// Counts spectrum refreshes. Spectra survive a device reset (the engine resets devices
     /// at every loop wrap), so a display that sees this stop advancing should let them fade.
     pub spectrum_updates: AtomicU32,
@@ -400,6 +425,8 @@ impl Default for Telemetry {
         Self {
             spectrum: std::array::from_fn(|_| AtomicU32::new((-120.0_f32).to_bits())),
             input_spectrum: std::array::from_fn(|_| AtomicU32::new((-120.0_f32).to_bits())),
+            reson: Arc::default(),
+            calor: Arc::default(),
             spectrum_updates: AtomicU32::new(0),
             input_db: AtomicU32::new((-120.0_f32).to_bits()),
             output_db: AtomicU32::new((-120.0_f32).to_bits()),
@@ -516,6 +543,8 @@ pub fn create_processor_with_telemetry(
         BuiltinKind::VariMu => varimu::create_varimu(instance, telemetry),
         BuiltinKind::Rain => rain::create_rain(instance, telemetry),
         BuiltinKind::Ferro => ferro::create_ferro(instance, telemetry),
+        BuiltinKind::Reson => reson::create_reson(instance, telemetry),
+        BuiltinKind::Calor => calor::create_calor(instance, telemetry),
     }
 }
 

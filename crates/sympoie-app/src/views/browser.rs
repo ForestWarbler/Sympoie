@@ -713,7 +713,7 @@ mod tests {
         );
         assert_eq!(
             names(Category::AudioEffects, ""),
-            ["EQ", "Comp", "Vari-Mu", "Comp", "Reverb"]
+            ["EQ", "Comp", "Vari-Mu", "Reson", "Calor", "Comp", "Reverb"]
         );
         assert_eq!(
             names(Category::Plugins, ""),

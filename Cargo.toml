@@ -1,7 +1,23 @@
 [workspace]
 resolver = "3"
-members = ["crates/sympoie", "crates/sympoie-app"]
-default-members = ["crates/sympoie", "crates/sympoie-app"]
+members = [
+    "crates/calor",
+    "crates/calor-plugin",
+    "crates/calor-ui",
+    "crates/reson",
+    "crates/reson-plugin",
+    "crates/reson-ui",
+    "crates/sympoie",
+    "crates/sympoie-app",
+]
+default-members = [
+    "crates/calor",
+    "crates/calor-ui",
+    "crates/reson",
+    "crates/reson-ui",
+    "crates/sympoie",
+    "crates/sympoie-app",
+]
 exclude = ["vendor/vst3-host", "vendor/signalsmith-pitch", "vendor/rubberband-pitch"]
 
 [workspace.package]

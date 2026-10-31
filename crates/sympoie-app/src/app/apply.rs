@@ -1318,14 +1318,29 @@ impl SympoieApp {
                 },
             );
         }
-        let key = if parameter < 30
-            && self.document.project().plugin(id).is_some_and(|plugin| {
-                sympoie::builtin::BuiltinKind::from_descriptor(&plugin.descriptor)
-                    == Some(sympoie::builtin::BuiltinKind::Eq)
-            }) {
-            format!("builtin-eq-{id}-band-{}", parameter / 5)
-        } else {
-            format!("vst3-{id}-{parameter}")
+        // Dragging an EQ or Reson node moves several of its band's parameters at once, and
+        // a Calor style sets a whole band; each makes one undo step.
+        use sympoie::builtin::{BuiltinKind, calor, reson};
+        let builtin = self
+            .document
+            .project()
+            .plugin(id)
+            .and_then(|plugin| BuiltinKind::from_descriptor(&plugin.descriptor));
+        let key = match builtin {
+            Some(BuiltinKind::Eq) if parameter < 30 => {
+                format!("builtin-eq-{id}-band-{}", parameter / 5)
+            }
+            Some(BuiltinKind::Reson) if (reson::BAND_BASE..reson::FOCUS).contains(&parameter) => {
+                format!(
+                    "builtin-reson-{id}-band-{}",
+                    (parameter - reson::BAND_BASE) / reson::BAND_STRIDE
+                )
+            }
+            Some(BuiltinKind::Calor) if calor::band_slot(parameter).is_some() => {
+                let band = calor::band_slot(parameter).map_or(0, |(band, _)| band);
+                format!("builtin-calor-{id}-band-{band}")
+            }
+            _ => format!("vst3-{id}-{parameter}"),
         };
         self.edit_coalesced(&key, "Plugin Parameter", |project| {
             project

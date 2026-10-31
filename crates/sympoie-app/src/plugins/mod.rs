@@ -372,12 +372,13 @@ impl PluginRuntime {
     }
 
     pub fn latency_samples(&self, id: u64) -> Option<u32> {
-        if self
+        if let Some(kind) = self
             .builtins
             .lock()
-            .is_ok_and(|entries| entries.contains_key(&id))
+            .ok()
+            .and_then(|entries| entries.get(&id).map(|(kind, _)| *kind))
         {
-            return Some(0);
+            return Some(builtin::latency_samples(kind));
         }
         self.live
             .lock()

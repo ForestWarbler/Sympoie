@@ -1,0 +1,21 @@
+[package]
+name = "reson-plugin"
+description = "Reson as a VST3 and CLAP plugin for other hosts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "reson"
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+egui = { version = "0.36.1", default-features = false }
+nice-plug = "0.4.2"
+nice-plug-egui = "0.5.1"
+sympoie-reson = { path = "../reson" }
+sympoie-reson-ui = { path = "../reson-ui" }

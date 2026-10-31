@@ -14,6 +14,8 @@ default = ["native-pitch"]
 native-pitch = ["dep:sympoie-signalsmith-pitch", "dep:sympoie-rubberband-pitch"]
 
 [dependencies]
+sympoie-calor = { path = "../calor" }
+sympoie-reson = { path = "../reson" }
 sympoie-signalsmith-pitch = { path = "../../vendor/signalsmith-pitch", optional = true }
 sympoie-rubberband-pitch = { path = "../../vendor/rubberband-pitch", optional = true }
 flacenc = { version = "0.5.1", default-features = false }
