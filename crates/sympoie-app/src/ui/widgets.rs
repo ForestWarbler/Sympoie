@@ -663,14 +663,19 @@ pub fn knob(ui: &mut Ui, value: &mut f32, label: &str, display: &str) -> Respons
     response.on_hover_and_drag_cursor(CursorIcon::ResizeVertical)
 }
 
+/// The travel of a fader drawn in `rect`: its cap's centre stays inside it.
+pub fn fader_track(rect: Rect) -> Rect {
+    Rect::from_center_size(rect.center(), vec2(7.0, (rect.height() - 24.0).max(1.0)))
+}
+
+fn fader_y(track: Rect, gain: f32) -> f32 {
+    egui::lerp(track.bottom()..=track.top(), format::gain_to_fader(gain))
+}
+
+/// A vertical fader centred in its rect, without a scale; see [`fader_scale`].
 pub fn gain_fader(ui: &mut Ui, gain: &mut f32, size: Vec2, color: Color32) -> Response {
     let (rect, mut response) = ui.allocate_exact_size(size, Sense::click_and_drag());
-    let center_x = rect.right() - 15.0;
-    let track = Rect::from_center_size(
-        pos2(center_x, rect.center().y),
-        vec2(7.0, (rect.height() - 22.0).max(1.0)),
-    );
-    let to_y = |position: f32| egui::lerp(track.bottom()..=track.top(), position);
+    let track = fader_track(rect);
     if response.dragged() {
         let fine = ui.input(|i| i.modifiers.shift);
         let delta = -response.drag_delta().y / track.height() * if fine { 0.2 } else { 1.0 };
@@ -687,75 +692,31 @@ pub fn gain_fader(ui: &mut Ui, gain: &mut f32, size: Vec2, color: Color32) -> Re
     }
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        for (db, label) in [
-            (6.0, "+6"),
-            (0.0, "0"),
-            (-6.0, "−6"),
-            (-12.0, "−12"),
-            (-24.0, "−24"),
-            (-48.0, "−48"),
-        ] {
-            if track.height() < 100.0 && matches!(db, 6.0 | -6.0 | -24.0) {
-                continue;
-            }
-            let y = to_y(format::gain_to_fader(format::db_to_gain(db)));
-            let ink = if db == 0.0 {
-                theme::TEXT
-            } else {
-                theme::TEXT_FAINT
-            };
-            let width = if db == 0.0 { 6.0 } else { 4.0 };
-            painter.line_segment(
-                [
-                    pos2(track.left() - width - 5.0, y),
-                    pos2(track.left() - 5.0, y),
-                ],
-                Stroke::new(1.0, ink),
-            );
-            if rect.width() >= 50.0 {
-                painter.text(
-                    pos2(track.left() - 13.0, y),
-                    Align2::RIGHT_CENTER,
-                    label,
-                    theme::mono(8.0),
-                    ink,
-                );
-            }
-        }
+        let center_x = track.center().x;
         analog::well(painter, track.expand2(vec2(1.0, 2.0)), 3.0);
         painter.vline(
             center_x + 1.0,
             track.y_range(),
             Stroke::new(1.0, Color32::from_gray(24)),
         );
-        if rect.width() >= 50.0 && track.height() >= 100.0 {
-            painter.text(
-                pos2(track.left() - 13.0, track.bottom()),
-                Align2::RIGHT_CENTER,
-                "−∞",
-                theme::mono(8.0),
-                theme::TEXT_FAINT,
-            );
-        }
-        let position = format::gain_to_fader(*gain);
-        let y = to_y(position);
+        let y = fader_y(track, *gain);
         let hot = if response.hovered() || response.dragged() {
             Color32::from_gray(0xf4)
         } else {
             Color32::from_gray(0xd0)
         };
-        let cap = Rect::from_center_size(pos2(center_x, y), vec2(24.0, 18.0));
+        let cap = Rect::from_center_size(pos2(center_x, y), vec2(28.0, 20.0));
         painter.rect_filled(
             cap.translate(vec2(0.0, 2.0)).expand(1.0),
-            2.0,
+            2.5,
             Color32::from_black_alpha(160),
         );
-        painter.rect_filled(cap, 2.0, Color32::from_gray(0x45));
+        painter.rect_filled(cap, 2.5, Color32::from_gray(0x45));
         let face = cap.shrink(1.0);
         analog::gradient_rect(painter, face, hot, Color32::from_gray(0x79));
         painter.rect_stroke(
             cap,
-            2.0,
+            2.5,
             Stroke::new(1.0, Color32::from_gray(0x12)),
             StrokeKind::Inside,
         );
@@ -795,6 +756,58 @@ pub fn gain_fader(ui: &mut Ui, gain: &mut f32, size: Vec2, color: Color32) -> Re
     response
         .on_hover_and_drag_cursor(CursorIcon::ResizeVertical)
         .on_hover_text(hint)
+}
+
+/// The dB scale for a [`gain_fader`] drawn in `fader`, painted in the column `rect`
+/// beside it. Labels that would crowd the one above are left out; 0 dB always shows.
+pub fn fader_scale(painter: &egui::Painter, rect: Rect, fader: Rect) {
+    let track = fader_track(fader);
+    let marks = [
+        (6.0, "+6"),
+        (0.0, "0"),
+        (-6.0, "6"),
+        (-12.0, "12"),
+        (-24.0, "24"),
+        (-48.0, "48"),
+    ];
+    let mut last: Option<f32> = None;
+    let mut ticks = Vec::with_capacity(marks.len() + 1);
+    for (db, label) in marks {
+        let y = fader_y(track, format::db_to_gain(db));
+        let room = last.is_none_or(|above| y - above >= 11.0);
+        if db == 0.0 || room {
+            ticks.push((y, label, db == 0.0));
+            last = Some(y);
+        }
+    }
+    if last.is_none_or(|above| track.bottom() - above >= 11.0) {
+        ticks.push((track.bottom(), "∞", false));
+    }
+    for (y, label, unity) in ticks {
+        let ink = if unity {
+            theme::TEXT
+        } else {
+            theme::TEXT_FAINT
+        };
+        let y = y.round() + 0.5;
+        painter.hline(
+            rect.left()..=(rect.left() + if unity { 5.0 } else { 3.0 }),
+            y,
+            Stroke::new(1.0, ink),
+        );
+        painter.hline(
+            (rect.right() - if unity { 5.0 } else { 3.0 })..=rect.right(),
+            y,
+            Stroke::new(1.0, ink),
+        );
+        painter.text(
+            pos2(rect.center().x, y),
+            Align2::CENTER_CENTER,
+            label,
+            theme::mono(8.0),
+            ink,
+        );
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]

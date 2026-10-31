@@ -29,6 +29,8 @@ const MIN_GAIN_DB: f64 = -70.0;
 const STRIP_TOP: Color32 = Color32::from_rgb(0x33, 0x33, 0x34);
 const STRIP_SELECTED_BOTTOM: Color32 = Color32::from_rgb(0x3b, 0x3c, 0x3f);
 const SLOT_RADIUS: f32 = 3.5;
+const FADER_WIDTH: f32 = 34.0;
+const SCALE_WIDTH: f32 = 28.0;
 
 #[path = "mixer_sends.rs"]
 mod sends;
@@ -490,27 +492,35 @@ fn strip(
             gain_readout(ui, index, mixer, actions);
 
             let fader_height = (ui.available_height() - 1.0).max(42.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                let fader_width = 62.0;
-                let controls_width = fader_width + if meter.is_some() { 19.0 } else { 0.0 };
-                ui.add_space(((inner.width() - controls_width) / 2.0).max(0.0));
-                let mut gain = mixer.gain();
-                let fader =
-                    widgets::gain_fader(ui, &mut gain, vec2(fader_width, fader_height), color);
-                ui.interact(fader.rect, Id::new(("mixer-fader", index)), Sense::hover());
-                if fader.changed() {
-                    push_gain(actions, index, mixer, gain);
-                }
-                if let Some(meter) = meter {
-                    let response = widgets::meter(ui, meter, vec2(13.0, fader_height), true);
-                    ui.interact(
-                        response.rect,
-                        Id::new(("mixer-meter", index)),
-                        Sense::hover(),
-                    );
-                }
+            let (bay, _) =
+                ui.allocate_exact_size(vec2(inner.width(), fader_height), Sense::hover());
+            fader_bay(ui.painter(), bay);
+            // Fader, scale and meter sit as one centred group, the scale between them.
+            let meter_width = if meter.is_some() { 16.0 } else { 0.0 };
+            let group = FADER_WIDTH + SCALE_WIDTH + meter_width;
+            let left = (bay.center().x - group / 2.0).round();
+            let fader_rect =
+                Rect::from_min_size(pos2(left, bay.top()), vec2(FADER_WIDTH, bay.height()));
+            let mut gain = mixer.gain();
+            let fader = widgets::inside(ui, fader_rect, Layout::left_to_right(Align::Min), |ui| {
+                widgets::gain_fader(ui, &mut gain, fader_rect.size(), color)
             });
+            ui.interact(fader.rect, Id::new(("mixer-fader", index)), Sense::hover());
+            if fader.changed() {
+                push_gain(actions, index, mixer, gain);
+            }
+            let scale = Rect::from_min_size(
+                pos2(fader_rect.right(), bay.top()),
+                vec2(SCALE_WIDTH, bay.height()),
+            );
+            widgets::fader_scale(ui.painter(), scale.shrink2(vec2(3.0, 0.0)), fader_rect);
+            if let Some(meter) = meter {
+                let meter_rect = Rect::from_min_size(
+                    pos2(scale.right(), bay.top() + 6.0),
+                    vec2(meter_width, (bay.height() - 12.0).max(1.0)),
+                );
+                widgets::meter_at(ui, meter, meter_rect, Id::new(("mixer-meter", index)), true);
+            }
         });
     });
     ui.painter().vline(
@@ -1002,6 +1012,22 @@ fn caption(text: &str, size: f32, tracking: f32, color: Color32) -> RichText {
         .size(size)
         .extra_letter_spacing(tracking)
         .color(color)
+}
+
+/// The recess the fader, its scale and the meter sit in.
+fn fader_bay(painter: &Painter, rect: Rect) {
+    painter.hline(
+        (rect.left() + 5.0)..=(rect.right() - 5.0),
+        rect.bottom() + 0.5,
+        Stroke::new(1.0, Color32::from_white_alpha(10)),
+    );
+    painter.rect(
+        rect,
+        5.0,
+        Color32::from_black_alpha(45),
+        Stroke::new(1.0, Color32::from_black_alpha(110)),
+        StrokeKind::Inside,
+    );
 }
 
 fn strip_body(painter: &Painter, rect: Rect, selected: bool) {
