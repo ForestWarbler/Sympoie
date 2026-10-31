@@ -1,11 +1,10 @@
 use std::collections::HashSet;
 
-use eframe::egui::{self, Align2, Id, Response, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use eframe::egui::{self, Align2, Color32, Id, Response, Sense, Stroke, Ui, pos2, vec2};
 use sympoie::automation::{AutomationTarget, SubtractiveParameter};
 use sympoie::plugin::PluginInstance;
 use sympoie::track::Track;
 
-use super::RED;
 use crate::ui::{theme, widgets};
 
 fn plugins(track: &Track) -> impl Iterator<Item = &PluginInstance> {
@@ -62,20 +61,15 @@ pub(super) fn selector(
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, ui.is_enabled(), &label)
     });
-    let visuals = ui.style().interact(&response);
-    ui.painter().rect(
-        rect,
-        visuals.corner_radius,
-        visuals.weak_bg_fill,
-        visuals.bg_stroke,
-        StrokeKind::Inside,
-    );
+    let popup_id = Id::new(("automation-target-menu", index));
+    let hot = response.hovered() || egui::Popup::is_id_open(ui.ctx(), popup_id);
+    widgets::field(ui.painter(), rect, hot);
     widgets::fitted_text(
         ui.painter(),
         rect.shrink(4.0).with_max_x(rect.right() - 16.0),
         &label,
         theme::prop(10.5),
-        RED,
+        if hot { Color32::WHITE } else { theme::TEXT },
         Align2::LEFT_CENTER,
     );
     let arrow = pos2(rect.right() - 8.0, rect.center().y);
@@ -85,11 +79,10 @@ pub(super) fn selector(
             arrow + vec2(3.0, -1.5),
             arrow + vec2(0.0, 2.0),
         ],
-        RED,
+        if hot { theme::TEXT } else { theme::TEXT_DIM },
         Stroke::NONE,
     ));
 
-    let popup_id = Id::new(("automation-target-menu", index));
     if response.clicked() && !egui::Popup::is_id_open(ui.ctx(), popup_id) {
         for plugin in plugins(track) {
             ui.data_mut(|data| {
@@ -99,6 +92,7 @@ pub(super) fn selector(
     }
     let mut chosen = None;
     egui::Popup::menu(&response)
+        .style(widgets::menu_style())
         .id(popup_id)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
@@ -175,7 +169,7 @@ fn parameter(
         name.to_owned()
     };
     ui.push_id(candidate, |ui| {
-        ui.selectable_label(candidate == selected, label)
+        widgets::choice(ui, true, candidate == selected, &label)
     })
     .inner
 }
@@ -193,14 +187,14 @@ fn plugin_menu(
     let mut search = ui
         .data(|data| data.get_temp::<String>(search_id))
         .unwrap_or_default();
-    let changed = ui
-        .add(
-            egui::TextEdit::singleline(&mut search)
-                .id(search_id)
-                .hint_text("Search parameters")
-                .desired_width(f32::INFINITY),
-        )
-        .changed();
+    let field = ui.add(
+        egui::TextEdit::singleline(&mut search)
+            .id(search_id)
+            .hint_text("Search parameters")
+            .desired_width(f32::INFINITY),
+    );
+    widgets::ring_focus(ui, &field);
+    let changed = field.changed();
     ui.data_mut(|data| data.insert_temp(search_id, search.clone()));
     let query = search.trim().to_lowercase();
     let parameters: Vec<_> = plugin

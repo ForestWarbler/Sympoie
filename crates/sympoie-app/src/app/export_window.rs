@@ -12,6 +12,7 @@ use crate::export_config::{
     ExportConfig, ExportContext, ExportDepth, ExportFormat, ExportRange, ExportSource,
     plan_exports, sample_rate_label,
 };
+use crate::ui::widgets::{blue_tick, checkbox, choice};
 use crate::ui::{theme, widgets};
 
 const LABEL_WIDTH: f32 = 96.0;
@@ -289,6 +290,9 @@ impl SympoieApp {
                         ui.add(
                             egui::ProgressBar::new(job.fraction())
                                 .desired_width(200.0)
+                                .desired_height(13.0)
+                                .corner_radius(3)
+                                .fill(theme::SELECT)
                                 .show_percentage(),
                         );
                         if ui.button("Cancel").clicked() {
@@ -307,8 +311,8 @@ impl SympoieApp {
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let render =
-                            egui::Button::new(RichText::new("Render").color(Color32::BLACK))
-                                .fill(theme::ACCENT);
+                            egui::Button::new(RichText::new("Render").color(Color32::WHITE))
+                                .fill(theme::SELECT);
                         let any = window.configs.iter().any(|config| config.enabled);
                         if ui
                             .add_enabled(any && !busy, render)
@@ -322,7 +326,9 @@ impl SympoieApp {
                         {
                             command = Some((usize::MAX, CardAction::Render));
                         }
-                        ui.menu_button("+ Config", |ui| {
+                        let rows = egui::menu::MenuConfig::new().style(widgets::menu_style());
+                        let add = egui::menu::MenuButton::new("+ Config").config(rows);
+                        add.ui(ui, |ui| {
                             if ui
                                 .button("Default")
                                 .on_hover_text(ExportConfig::default().summary())
@@ -335,23 +341,43 @@ impl SympoieApp {
                                 ui.separator();
                             }
                             for (index, preset) in presets.iter().enumerate() {
-                                ui.horizontal(|ui| {
-                                    if ui
-                                        .button(&preset.name)
-                                        .on_hover_text(preset.config.summary())
-                                        .clicked()
-                                    {
-                                        window.configs.push(preset.config.clone());
-                                        ui.close();
-                                    }
-                                    if ui
-                                        .small_button("×")
-                                        .on_hover_text(format!("Delete the preset {}", preset.name))
-                                        .clicked()
-                                    {
-                                        command = Some((index, CardAction::DeletePreset));
-                                    }
+                                // The row keeps room at its right end for the delete key.
+                                let slot = Id::new(("export-preset-delete", index));
+                                let row = egui::Button::new(&preset.name)
+                                    .right_text(egui::Atom::custom(slot, vec2(12.0, 12.0)))
+                                    .atom_ui(ui);
+                                let delete = row.rect(slot).is_some_and(|slot| {
+                                    let key = egui::Rect::from_x_y_ranges(
+                                        slot.x_range().expand(3.0),
+                                        row.response.rect.y_range(),
+                                    );
+                                    widgets::inside(
+                                        ui,
+                                        key,
+                                        egui::Layout::centered_and_justified(
+                                            egui::Direction::TopDown,
+                                        ),
+                                        |ui| {
+                                            ui.add(egui::Button::new("×").frame(false))
+                                                .on_hover_text(format!(
+                                                    "Delete the preset {}",
+                                                    preset.name
+                                                ))
+                                                .clicked()
+                                        },
+                                    )
                                 });
+                                if delete {
+                                    command = Some((index, CardAction::DeletePreset));
+                                }
+                                if row
+                                    .response
+                                    .on_hover_text(preset.config.summary())
+                                    .clicked()
+                                {
+                                    window.configs.push(preset.config.clone());
+                                    ui.close();
+                                }
                             }
                         });
                     });
@@ -454,20 +480,25 @@ fn config_card(ui: &mut Ui, index: usize, config: &mut ExportConfig) -> Option<C
     if ui.is_rect_visible(rect) {
         let painter = ui.painter_at(rect);
         let fill = if response.hovered() {
-            theme::tint(theme::LANE, theme::ACCENT, 0.12)
+            theme::BG_RAISED
         } else {
-            theme::LANE
+            theme::HEADER
         };
         painter.rect_filled(rect, 6.0, fill);
+        painter.hline(
+            (rect.left() + 6.0)..=(rect.right() - 6.0),
+            rect.top() + 1.5,
+            egui::Stroke::new(1.0, Color32::from_white_alpha(12)),
+        );
         painter.rect_stroke(
             rect,
             6.0,
             egui::Stroke::new(
                 1.0,
                 if config.enabled {
-                    theme::ACCENT.gamma_multiply(0.7)
+                    theme::SELECT
                 } else {
-                    Color32::from_white_alpha(30)
+                    theme::BORDER
                 },
             ),
             egui::StrokeKind::Inside,
@@ -496,7 +527,7 @@ fn config_card(ui: &mut Ui, index: usize, config: &mut ExportConfig) -> Option<C
         } else {
             config.format.file_format().label().to_owned()
         };
-        text(0.0, 28.0, &format, 22.0, theme::ACCENT);
+        text(0.0, 28.0, &format, 22.0, theme::TEXT);
         let quality = format!(
             "{} · {}",
             config.quality_label(),
@@ -520,6 +551,9 @@ fn config_card(ui: &mut Ui, index: usize, config: &mut ExportConfig) -> Option<C
         switch,
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
+            if config.enabled {
+                blue_tick(&mut ui.visuals_mut().widgets);
+            }
             ui.add(egui::Checkbox::without_text(&mut config.enabled))
                 .on_hover_text("Render this configuration");
         },
@@ -587,9 +621,13 @@ fn config_settings(
 
 fn row(ui: &mut Ui, label: &str, contents: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
-        ui.add_sized(
-            [LABEL_WIDTH, 20.0],
-            egui::Label::new(RichText::new(label).color(theme::TEXT_DIM)),
+        ui.allocate_ui_with_layout(
+            vec2(LABEL_WIDTH, 20.0),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                ui.set_width(LABEL_WIDTH);
+                ui.label(RichText::new(label).color(theme::TEXT_DIM));
+            },
         );
         contents(ui);
     });
@@ -605,15 +643,18 @@ fn combo<T: Copy + PartialEq>(
     let choices: Vec<_> = choices.into_iter().collect();
     let selected = choices
         .iter()
-        .find(|(choice, _)| choice == value)
+        .find(|(option, _)| option == value)
         .map_or_else(String::new, |(_, label)| label.clone());
     ui.add_enabled_ui(enabled, |ui| {
         egui::ComboBox::from_id_salt(id)
             .width(FIELD_WIDTH - 8.0)
             .selected_text(selected)
+            .popup_style(widgets::menu_style())
             .show_ui(ui, |ui| {
-                for (choice, label) in choices {
-                    ui.selectable_value(value, choice, label);
+                for (option, label) in choices {
+                    if choice(ui, true, *value == option, &label).clicked() {
+                        *value = option;
+                    }
                 }
             });
     });
@@ -622,7 +663,9 @@ fn combo<T: Copy + PartialEq>(
 fn configuration_editor(ui: &mut Ui, config: &mut ExportConfig, default_folder: Option<&Path>) {
     let audio = config.source != ExportSource::StemsProject;
     row(ui, "Name", |ui| {
-        ui.add(egui::TextEdit::singleline(&mut config.name).desired_width(FIELD_WIDTH - 8.0));
+        let field =
+            ui.add(egui::TextEdit::singleline(&mut config.name).desired_width(FIELD_WIDTH - 8.0));
+        widgets::ring_focus(ui, &field);
     });
     let previous_source = config.source;
     row(ui, "Render", |ui| {
@@ -699,18 +742,21 @@ fn configuration_editor(ui: &mut Ui, config: &mut ExportConfig, default_folder: 
         );
     });
     row(ui, "Dither", |ui| {
-        ui.add_enabled(
+        checkbox(
+            ui,
             audio && format.has_bit_depth() && config.depth != ExportDepth::Float32,
-            egui::Checkbox::new(&mut config.dither, "Triangular dither"),
+            &mut config.dither,
+            "Triangular dither",
         );
     });
     row(ui, "File name", |ui| {
-        ui.add(
+        let field = ui.add(
             egui::TextEdit::singleline(&mut config.file_name)
                 .desired_width(FIELD_WIDTH - 8.0)
                 .hint_text(config.source.default_file_name()),
-        )
-        .on_hover_text("{project}, {track} and {name} are replaced by the project, track and configuration names");
+        );
+        widgets::ring_focus(ui, &field);
+        field.on_hover_text("{project}, {track} and {name} are replaced by the project, track and configuration names");
     });
     row(ui, "Folder", |ui| {
         let shown = match (&config.folder, default_folder) {

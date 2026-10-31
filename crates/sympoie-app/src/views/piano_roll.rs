@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 
 use eframe::egui::{
-    self, Align, Align2, Color32, CursorIcon, Grid, Id, Key, KeyboardShortcut, Layout, Modifiers,
-    Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2,
+    self, Align, Align2, Color32, CornerRadius, CursorIcon, Grid, Id, Key, KeyboardShortcut,
+    Layout, Mesh, Modifiers, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind, Ui, UiBuilder,
+    pos2, vec2,
 };
 use sympoie::TICKS_PER_QUARTER;
 use sympoie::clip::{BEND_MAX, BEND_MIN, BendPoint, MidiNote, bend_value_at, thin_bend};
@@ -11,9 +12,26 @@ use sympoie::time::{SnapGrid, TimeSignature};
 
 use crate::actions::Action;
 use crate::document::edit::{self, ClipRef};
+use crate::ui::analog;
+use crate::ui::bars;
 use crate::ui::format;
+use crate::ui::rack;
 use crate::ui::theme;
 use crate::ui::widgets;
+
+const IVORY_BACK: Color32 = Color32::from_rgb(0xcf, 0xcf, 0xcf);
+const IVORY_FRONT: Color32 = Color32::from_rgb(0xec, 0xec, 0xec);
+const KEY_SEAM: Color32 = Color32::from_rgb(0x9a, 0x9a, 0x9c);
+const EBONY_TOP: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x2b);
+const EBONY_BOTTOM: Color32 = Color32::from_rgb(0x11, 0x11, 0x12);
+const EBONY_RADIUS: CornerRadius = CornerRadius {
+    nw: 0,
+    ne: 3,
+    sw: 0,
+    se: 3,
+};
+/// Width of the caption column in the side panel, so the values beside it line up.
+const LABEL_WIDTH: f32 = 66.0;
 
 const KEY_WIDTH: f32 = 62.0;
 const SIDE_WIDTH: f32 = 172.0;
@@ -564,7 +582,7 @@ pub fn show(
         full.min,
         pos2((full.left() + SIDE_WIDTH).min(full.right()), full.bottom()),
     );
-    ui.painter().rect_filled(side, 0.0, theme::BG_RAISED);
+    ui.painter().rect_filled(side, 0.0, theme::BG_PANEL);
     ui.painter().vline(
         side.right() + 0.5,
         side.y_range(),
@@ -594,6 +612,9 @@ pub fn show(
             .layout(Layout::top_down(Align::Min)),
     );
     let ui = &mut editor_ui;
+    // The hint line sits in a header strip level with the side panel's title bar.
+    let strip = Rect::from_min_size(editor.min, vec2(editor.width(), 18.0));
+    widgets::title_bar(ui.painter(), strip);
     ui.horizontal(|ui| {
         ui.add_space(6.0);
         let text = state.notice.as_deref().unwrap_or("Double-click to add · drag to move / resize edges · Cmd/Ctrl-drag to copy · Shift-click or drag to select · Alt: no snap · wheel: pitch · Shift-wheel: time");
@@ -634,27 +655,27 @@ pub fn show(
     }
     let divider = divider_rect(state.velocity_height);
     ui.painter().rect_filled(divider, 0.0, theme::BG_PANEL);
-    ui.painter().hline(
-        divider.x_range(),
-        divider.center().y,
-        Stroke::new(1.0, theme::BORDER),
-    );
-    ui.painter().hline(
-        divider.center().x - 16.0..=divider.center().x + 16.0,
-        divider.center().y,
-        Stroke::new(
-            2.0,
-            if divider_response.hovered() || divider_response.dragged() {
-                theme::ACCENT
-            } else {
-                theme::TEXT_DIM
-            },
-        ),
+    for y in [divider.top() + 0.5, divider.bottom() - 0.5] {
+        ui.painter()
+            .hline(divider.x_range(), y, Stroke::new(1.0, theme::BORDER));
+    }
+    ui.painter().rect_filled(
+        Rect::from_center_size(divider.center(), vec2(30.0, 3.0)),
+        1.5,
+        if divider_response.dragged() {
+            theme::SELECT
+        } else if divider_response.hovered() {
+            theme::TEXT
+        } else {
+            theme::TEXT_FAINT
+        },
     );
     let ruler = Rect::from_min_max(
         pos2(area.left() + KEY_WIDTH, area.top()),
         pos2(area.right(), area.top() + RULER_HEIGHT),
     );
+    // Drawn up to the header strip, over the item spacing under the hint line.
+    let ruler_band = ruler.with_min_y(strip.bottom().min(ruler.top()));
     let grid = Rect::from_min_max(
         pos2(ruler.left(), ruler.bottom()),
         pos2(area.right(), divider.top()),
@@ -720,7 +741,7 @@ pub fn show(
     if let Some(key) = show_grid(
         ui,
         geo,
-        ruler,
+        ruler_band,
         area.left(),
         extent,
         project.time_signature(),
@@ -1044,17 +1065,35 @@ pub fn show(
         .unwrap_or(&clip.notes);
     paint_notes(ui, geo, notes, selected, color);
     match state.lane {
-        Lane::Velocity => paint_velocity(ui, geo, velocity, area.left(), notes, selected, color),
+        Lane::Velocity => paint_velocity(
+            ui,
+            geo,
+            velocity,
+            area.left(),
+            notes,
+            selected,
+            color,
+            project.time_signature(),
+        ),
         Lane::Bend => {
             let points = state
                 .bend_drag
                 .as_ref()
                 .map_or(clip.pitch_bend.as_slice(), BendDrag::preview);
             let hovered = pointer.filter(|pointer| velocity.contains(*pointer));
-            paint_bend(ui, geo, velocity, area.left(), points, hovered, color);
+            paint_bend(
+                ui,
+                geo,
+                velocity,
+                area.left(),
+                points,
+                hovered,
+                color,
+                project.time_signature(),
+            );
         }
     }
-    paint_region(ui, geo, ruler, velocity, region, extent);
+    paint_region(ui, geo, ruler_band, velocity, region, extent, color);
     if let Some(marquee) = &state.marquee
         && marquee.current.distance(marquee.origin) > 3.0
     {
@@ -1072,30 +1111,72 @@ pub fn show(
     {
         let x = geo.x(playhead_tick - clip.start_tick + region.0);
         if x >= grid.left() && x <= grid.right() {
-            ui.painter().line_segment(
-                [pos2(x, ruler.top()), pos2(x, velocity.bottom())],
+            let (x, top) = (x.round() + 0.5, ruler_band.top());
+            ui.painter().vline(
+                x,
+                top..=velocity.bottom(),
                 Stroke::new(1.0, theme::PLAYHEAD),
+            );
+            widgets::playhead_head(
+                &ui.painter().with_clip_rect(ruler_band),
+                x,
+                top,
+                theme::PLAYHEAD,
             );
         }
     }
     let cursor_x = geo.x(state.cursor_tick);
     if grid.x_range().contains(cursor_x) {
-        ui.painter().line_segment(
-            [
-                pos2(cursor_x, ruler.bottom() - 5.0),
-                pos2(cursor_x, ruler.bottom()),
-            ],
-            Stroke::new(2.0, theme::TEXT),
-        );
+        // Kept whole at the edges: it starts at the region start, which Fit puts at the left.
+        let x = (cursor_x.round() + 0.5).clamp(ruler.left() + 4.0, ruler.right() - 4.0);
+        ui.painter()
+            .with_clip_rect(ruler)
+            .add(Shape::convex_polygon(
+                vec![
+                    pos2(x - 4.0, ruler.bottom() - 6.0),
+                    pos2(x + 4.0, ruler.bottom() - 6.0),
+                    pos2(x, ruler.bottom() - 1.0),
+                ],
+                theme::TEXT,
+                Stroke::NONE,
+            ));
     }
     let scrollbar =
         Rect::from_min_max(pos2(grid.left(), area.bottom() - 22.0), area.right_bottom());
-    ui.scope_builder(egui::UiBuilder::new().max_rect(scrollbar), |ui| {
-        ui.add_sized(
-            scrollbar.size(),
-            egui::Slider::new(&mut state.scroll_tick, 0.0..=max_scroll).show_value(false),
-        );
-    });
+    // egui lays the slider out `slider_width` wide, not across the row, so the dark track
+    // under it is sized from the slider's response.
+    let track = ui.painter().add(Shape::Noop);
+    let slider = ui
+        .scope_builder(egui::UiBuilder::new().max_rect(scrollbar), |ui| {
+            // A scroll position, not a level: a grey knob in a dark track, no fill.
+            ui.spacing_mut().slider_rail_height = 0.0;
+            let visuals = ui.visuals_mut();
+            visuals.slider_trailing_fill = false;
+            for (widget, gray) in [
+                (&mut visuals.widgets.inactive, 0x5a),
+                (&mut visuals.widgets.hovered, 0x6c),
+                (&mut visuals.widgets.active, 0x7a),
+            ] {
+                widget.bg_fill = Color32::from_gray(gray);
+                widget.fg_stroke = Stroke::new(1.0, Color32::from_gray(0x16));
+            }
+            ui.add_sized(
+                scrollbar.size(),
+                egui::Slider::new(&mut state.scroll_tick, 0.0..=max_scroll).show_value(false),
+            )
+        })
+        .inner;
+    ui.painter().set(
+        track,
+        Shape::rect_filled(
+            Rect::from_x_y_ranges(
+                slider.rect.x_range(),
+                (scrollbar.center().y - 3.0)..=(scrollbar.center().y + 3.0),
+            ),
+            3.0,
+            theme::BG_WIDGET,
+        ),
+    );
     lane_switch(
         ui,
         state,
@@ -1122,23 +1203,21 @@ fn lane_switch(ui: &mut Ui, state: &mut PianoRollState, rect: Rect) {
         );
         let response = ui.interact(tab, Id::new(("piano-lane", index)), Sense::click());
         let on = state.lane == lane;
-        ui.painter().rect_filled(
-            tab,
-            2.0,
-            if on {
-                theme::ACCENT.gamma_multiply(0.35)
-            } else if response.hovered() {
-                theme::BG_RAISED
-            } else {
-                theme::BG_PANEL
-            },
+        let cap = analog::key(
+            ui.painter(),
+            tab.shrink2(vec2(0.5, 0.0)),
+            3.5,
+            on.then_some(theme::SELECT),
+            response.hovered(),
+            response.is_pointer_button_down_on(),
         );
+        // 9 px keeps "Bend" clear of the rim on these 26 px keys.
         ui.painter().text(
-            tab.center(),
+            cap.center(),
             Align2::CENTER_CENTER,
             label,
-            theme::prop(10.0),
-            if on { theme::TEXT } else { theme::TEXT_DIM },
+            theme::prop(9.0),
+            widgets::key_ink(on.then_some(theme::SELECT), response.hovered()),
         );
         if response.on_hover_text(hint).clicked() {
             state.lane = lane;
@@ -1175,7 +1254,7 @@ fn toolbar(
                 .color(theme::TEXT_DIM),
             );
             ui.horizontal(|ui| {
-                if widgets::toggle(ui, "Draw", state.draw, theme::ACCENT, vec2(38.0, 18.0))
+                if widgets::toggle(ui, "Draw", state.draw, theme::SELECT, vec2(38.0, 18.0))
                     .on_hover_text("Single-click empty space to create a note")
                     .clicked()
                 {
@@ -1193,15 +1272,20 @@ fn toolbar(
             });
             Grid::new("piano-settings")
                 .num_columns(2)
-                .spacing([8.0, 5.0])
+                .spacing([4.0, 5.0])
+                .min_col_width(LABEL_WIDTH)
+                .striped(false)
                 .show(ui, |ui| {
+                    widgets::field_visuals(ui.style_mut());
                     ui.label(RichText::new("Grid").color(theme::TEXT_DIM));
                     egui::ComboBox::from_id_salt("piano-snap")
+                        .popup_style(widgets::menu_style())
                         .selected_text(format::grid_label(state.grid))
                         .width(60.0)
                         .show_ui(ui, |ui| {
                             for grid in format::GRIDS {
-                                ui.selectable_value(
+                                widgets::choice_value(
+                                    ui,
                                     &mut state.grid,
                                     grid,
                                     format::grid_label(grid),
@@ -1218,7 +1302,7 @@ fn toolbar(
                     .on_hover_text("Length of new notes, in ticks");
                     ui.end_row();
                 });
-            ui.separator();
+            ui.add_space(4.0);
 
             let source = state
                 .numeric
@@ -1228,17 +1312,18 @@ fn toolbar(
             let mut velocity = first.map_or(state.default_velocity, |index| source[index].velocity);
             let mut channel =
                 first.map_or(state.default_channel + 1, |index| source[index].channel + 1);
-            ui.label(
-                RichText::new(if first.is_some() {
+            caption(
+                ui,
+                if first.is_some() {
                     "Selection"
                 } else {
                     "New notes"
-                })
-                .color(theme::TEXT),
+                },
             );
             let velocity_response = ui
                 .horizontal(|ui| {
-                    ui.label(RichText::new("Velocity").color(theme::TEXT_DIM));
+                    field_label(ui, "Velocity");
+                    widgets::field_visuals(ui.style_mut());
                     ui.push_id("piano-velocity", |ui| {
                         ui.add(
                             egui::DragValue::new(&mut velocity)
@@ -1251,7 +1336,8 @@ fn toolbar(
                 .inner;
             let channel_response = ui
                 .horizontal(|ui| {
-                    ui.label(RichText::new("Channel").color(theme::TEXT_DIM));
+                    field_label(ui, "Channel");
+                    widgets::field_visuals(ui.style_mut());
                     ui.push_id("piano-channel", |ui| {
                         ui.add(egui::DragValue::new(&mut channel).range(1..=16).speed(0.1))
                     })
@@ -1261,7 +1347,8 @@ fn toolbar(
             let mut slide = first.map_or(0, |index| source[index].slide_ticks);
             let slide_response = ui
                 .horizontal(|ui| {
-                    ui.label(RichText::new("Slide").color(theme::TEXT_DIM));
+                    field_label(ui, "Slide");
+                    widgets::field_visuals(ui.style_mut());
                     ui.add_enabled_ui(first.is_some(), |ui| {
                         ui.push_id("piano-slide", |ui| {
                             ui.add(
@@ -1315,7 +1402,8 @@ fn toolbar(
                 ui.label(RichText::new(format::note_name(note.key)).strong());
                 let start_response = ui
                     .horizontal(|ui| {
-                        ui.label(RichText::new("Start").color(theme::TEXT_DIM));
+                        field_label(ui, "Start");
+                        widgets::field_visuals(ui.style_mut());
                         ui.push_id("piano-start", |ui| {
                             ui.add(
                                 egui::DragValue::new(&mut start)
@@ -1328,7 +1416,8 @@ fn toolbar(
                     .inner;
                 let duration_response = ui
                     .horizontal(|ui| {
-                        ui.label(RichText::new("Length").color(theme::TEXT_DIM));
+                        field_label(ui, "Length");
+                        widgets::field_visuals(ui.style_mut());
                         ui.push_id("piano-duration", |ui| {
                             ui.add(
                                 egui::DragValue::new(&mut duration)
@@ -1409,6 +1498,39 @@ fn toolbar(
                 }
             });
         });
+}
+
+/// A small spaced caption over a group of fields, with a groove running to the right.
+fn caption(ui: &mut Ui, text: &str) {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 12.0), Sense::hover());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
+    let painter = ui.painter();
+    let galley = rack::spaced(painter, text, theme::prop(8.5), theme::TEXT_FAINT, 0.8);
+    let end = rect.left() + galley.size().x;
+    painter.galley(
+        pos2(rect.left(), rect.center().y - galley.size().y / 2.0),
+        galley,
+        theme::TEXT_FAINT,
+    );
+    if end + 12.0 < rect.right() {
+        let y = rect.center().y.round() - 0.5;
+        let run = (end + 6.0)..=rect.right();
+        painter.hline(run.clone(), y, Stroke::new(1.0, theme::BORDER));
+        painter.hline(
+            run,
+            y + 1.0,
+            Stroke::new(1.0, Color32::from_white_alpha(10)),
+        );
+    }
+}
+
+/// A field's name in the side panel, padded to [`LABEL_WIDTH`].
+fn field_label(ui: &mut Ui, text: &str) {
+    let size = vec2(LABEL_WIDTH, ui.spacing().interact_size.y);
+    ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
+        ui.set_min_size(size);
+        ui.label(RichText::new(text).color(theme::TEXT_DIM));
+    });
 }
 
 fn audition(track: usize, notes: impl IntoIterator<Item = MidiNote>, actions: &mut Vec<Action>) {
@@ -1719,6 +1841,7 @@ fn emit_bend(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_bend(
     ui: &Ui,
     geo: Geometry,
@@ -1727,12 +1850,12 @@ fn paint_bend(
     points: &[BendPoint],
     hovered: Option<Pos2>,
     track_color: Color32,
+    meter: TimeSignature,
 ) {
     let painter = ui.painter().with_clip_rect(lane);
     painter.rect_filled(lane, 0.0, theme::BG_DEEP);
-    let axis = Rect::from_min_max(pos2(left, lane.top()), lane.left_bottom());
-    let axis_painter = ui.painter().with_clip_rect(axis);
-    axis_painter.rect_filled(axis, 0.0, theme::BG_PANEL);
+    paint_bar_bands(&painter, geo, lane, meter);
+    let (axis_painter, axis) = lane_axis(ui, lane, left);
     for (value, label) in [
         (BEND_MAX, "+"),
         (BEND_MAX / 2, ""),
@@ -1747,20 +1870,14 @@ fn paint_bend(
             Stroke::new(
                 1.0,
                 if value == 0 {
-                    theme::BORDER
+                    Color32::from_white_alpha(34)
                 } else {
                     theme::grid_beat()
                 },
             ),
         );
         if !label.is_empty() {
-            axis_painter.text(
-                pos2(axis.right() - 8.0, y),
-                Align2::RIGHT_CENTER,
-                label,
-                theme::mono(9.0),
-                theme::TEXT_DIM,
-            );
+            axis_tick(&axis_painter, axis, y, label);
         }
     }
     if points.is_empty() {
@@ -1785,32 +1902,44 @@ fn paint_bend(
         bend_y(lane, points[points.len() - 1].value),
     ));
     let zero = bend_y(lane, 0);
-    let fill: Vec<Pos2> = line.clone();
-    for pair in fill.windows(2) {
-        let mesh_color = track_color.gamma_multiply(0.18);
-        painter.add(egui::Shape::convex_polygon(
-            vec![
-                pair[0],
-                pair[1],
-                pos2(pair[1].x, zero),
-                pos2(pair[0].x, zero),
-            ],
-            mesh_color,
-            Stroke::NONE,
-        ));
+    let shade = track_color.gamma_multiply(0.18);
+    let mut fill = Mesh::default();
+    let mut span = |from: Pos2, to: Pos2| {
+        let first = fill.vertices.len() as u32;
+        for point in [from, to, pos2(to.x, zero), pos2(from.x, zero)] {
+            fill.colored_vertex(point, shade);
+        }
+        fill.add_triangle(first, first + 1, first + 2);
+        fill.add_triangle(first, first + 2, first + 3);
+    };
+    for pair in line.windows(2) {
+        let (from, to) = (pair[0], pair[1]);
+        // A segment crossing the centre is split there, so each part fills toward it.
+        if (from.y - zero) * (to.y - zero) < 0.0 {
+            let cross = pos2(
+                from.x + (to.x - from.x) * (zero - from.y) / (to.y - from.y),
+                zero,
+            );
+            span(from, cross);
+            span(cross, to);
+        } else {
+            span(from, to);
+        }
     }
-    painter.add(egui::Shape::line(line, Stroke::new(1.5, track_color)));
+    painter.add(Shape::mesh(fill));
+    painter.add(Shape::line(line, Stroke::new(1.5, track_color)));
     for point in points {
         let center = pos2(geo.x(point.tick), bend_y(lane, point.value));
         let hot = hovered.is_some_and(|pointer| pointer.distance(center) <= HANDLE_RADIUS);
+        let radius = if hot { 4.5 } else { 3.0 };
         painter.circle_filled(
             center,
-            if hot { 4.5 } else { 3.0 },
-            if hot { theme::ACCENT } else { track_color },
+            radius,
+            if hot { theme::SELECT } else { track_color },
         );
         painter.circle_stroke(
             center,
-            if hot { 4.5 } else { 3.0 },
+            radius,
             Stroke::new(1.0, Color32::from_black_alpha(160)),
         );
     }
@@ -1835,6 +1964,20 @@ fn velocity_shifted(notes: &[MidiNote], selected: &BTreeSet<usize>, delta: i16) 
     result
 }
 
+/// Shades every other bar of the clip, counting from its first bar like the ruler.
+fn paint_bar_bands(painter: &egui::Painter, geo: Geometry, lane: Rect, meter: TimeSignature) {
+    let from = geo.scroll_tick + f64::from(lane.left() - geo.grid.left()) / geo.pixels_per_tick;
+    let to = geo.scroll_tick + f64::from(lane.right() - geo.grid.left()) / geo.pixels_per_tick;
+    bars::paint_bands(
+        painter,
+        lane,
+        meter.ticks_per_bar(),
+        geo.pixels_per_tick,
+        from..=to,
+        |tick| geo.x(tick),
+    );
+}
+
 fn show_grid(
     ui: &Ui,
     geo: Geometry,
@@ -1849,32 +1992,51 @@ fn show_grid(
     painter.rect_filled(geo.grid, 0.0, theme::LANE);
     let keyboard_rect = Rect::from_min_max(pos2(left, geo.grid.top()), geo.grid.left_bottom());
     let keyboard = ui.painter().with_clip_rect(keyboard_rect);
-    for key in 0..=127u8 {
+    let keys_right = geo.grid.left() - 1.0;
+    horizontal_gradient(
+        &keyboard,
+        keyboard_rect.with_max_x(keys_right),
+        IVORY_BACK,
+        IVORY_FRONT,
+    );
+    let visible = |key: u8| {
         let y = geo.y(key);
-        if y + geo.row_height <= geo.grid.top() || y >= geo.grid.bottom() {
-            continue;
-        }
-        let black = matches!(key % 12, 1 | 3 | 6 | 8 | 10);
+        y + geo.row_height > geo.grid.top() && y < geo.grid.bottom()
+    };
+    let key_rect = |key: u8| {
+        let y = geo.y(key);
+        Rect::from_min_max(pos2(left, y), pos2(keys_right, y + geo.row_height - 1.0))
+    };
+    let ebony = |key_rect: Rect| key_rect.with_max_x(left + (key_rect.width() * 0.62));
+    let mut held = None;
+    for key in (0..=127u8).filter(|key| visible(*key)) {
+        let y = geo.y(key);
         let row = Rect::from_min_size(
             pos2(geo.grid.left(), y),
             vec2(geo.grid.width(), geo.row_height),
         );
-        painter.rect_filled(row, 0.0, if black { theme::LANE } else { theme::LANE_ALT });
-        painter.line_segment(
-            [row.left_bottom(), row.right_bottom()],
+        painter.rect_filled(
+            row,
+            0.0,
+            if is_black(key) {
+                theme::LANE
+            } else {
+                theme::LANE_ALT
+            },
+        );
+        painter.hline(
+            row.x_range(),
+            row.bottom(),
             Stroke::new(
                 1.0,
                 if key % 12 == 0 {
-                    Color32::from_gray(0x44)
+                    Color32::from_white_alpha(40)
                 } else {
-                    Color32::from_gray(0x1c)
+                    Color32::from_black_alpha(70)
                 },
             ),
         );
-        let key_rect = Rect::from_min_max(
-            pos2(left, y),
-            pos2(geo.grid.left() - 1.0, y + geo.row_height - 1.0),
-        );
+        let key_rect = key_rect(key);
         let response = ui
             .interact(
                 key_rect.intersect(keyboard_rect),
@@ -1886,39 +2048,100 @@ fn show_grid(
         if response.contains_pointer() && ui.input(|input| input.pointer.primary_pressed()) {
             pressed_key = Some(key);
         }
-        let pressed = response.is_pointer_button_down_on();
-        let light = if pressed {
-            theme::ACCENT
-        } else {
-            Color32::from_gray(0xc8)
-        };
-        keyboard.rect_filled(key_rect, 0.0, light);
-        if black {
+        if response.is_pointer_button_down_on() {
+            held = Some(key);
+            // A held ebony key lights only its body, drawn with the others below.
+            if !is_black(key) {
+                horizontal_gradient(
+                    &keyboard,
+                    key_rect,
+                    theme::SELECT.lerp_to_gamma(Color32::BLACK, 0.12),
+                    theme::SELECT.lerp_to_gamma(Color32::WHITE, 0.12),
+                );
+            }
+        }
+        keyboard.hline(
+            left..=keys_right,
+            key_rect.bottom() + 0.5,
+            Stroke::new(1.0, KEY_SEAM),
+        );
+        if is_black(key) {
             keyboard.rect_filled(
-                key_rect.with_max_x(left + (key_rect.width() * 0.62)),
-                0.0,
-                if pressed {
-                    theme::ACCENT
+                ebony(key_rect).translate(vec2(1.0, 1.0)),
+                EBONY_RADIUS,
+                Color32::from_black_alpha(46),
+            );
+        } else if key % 12 == 0 {
+            keyboard.text(
+                pos2(keys_right - 4.0, key_rect.center().y),
+                Align2::RIGHT_CENTER,
+                format::note_name(key),
+                theme::prop(9.0),
+                if held == Some(key) {
+                    widgets::ink_on(theme::SELECT)
                 } else {
-                    Color32::from_gray(0x1a)
+                    theme::TEXT_ON_COLOR
                 },
             );
         }
-        if key % 12 == 0 {
-            keyboard.text(
-                pos2(geo.grid.left() - 4.0, y + geo.row_height / 2.0),
-                Align2::RIGHT_CENTER,
-                format::note_name(key),
-                theme::prop(9.5),
-                theme::TEXT_ON_COLOR,
-            );
-        }
     }
+    // The ebony keys share one mesh, placed under their outlines and highlights.
+    let bodies = keyboard.add(Shape::Noop);
+    let mut mesh = Mesh::default();
+    for key in (0..=127u8).filter(|key| is_black(*key) && visible(*key)) {
+        let body = ebony(key_rect(key));
+        let (top, bottom) = if held == Some(key) {
+            (
+                theme::SELECT.lerp_to_gamma(Color32::WHITE, 0.12),
+                theme::SELECT.lerp_to_gamma(Color32::BLACK, 0.35),
+            )
+        } else {
+            (EBONY_TOP, EBONY_BOTTOM)
+        };
+        rounded_right_gradient(&mut mesh, body, f32::from(EBONY_RADIUS.ne), top, bottom);
+        keyboard.hline(
+            (body.left() + 1.0)..=(body.right() - 3.0),
+            body.top() + 1.5,
+            Stroke::new(1.0, Color32::from_white_alpha(22)),
+        );
+        keyboard.rect_stroke(
+            body,
+            EBONY_RADIUS,
+            Stroke::new(1.0, Color32::from_black_alpha(200)),
+            StrokeKind::Inside,
+        );
+    }
+    keyboard.set(bodies, Shape::mesh(mesh));
+    keyboard.vline(
+        geo.grid.left() - 0.5,
+        keyboard_rect.y_range(),
+        Stroke::new(1.0, theme::BORDER),
+    );
+    paint_bar_bands(&painter, geo, geo.grid, meter);
+
     let ruler_painter = ui.painter().with_clip_rect(ruler);
-    ruler_painter.rect_filled(ruler, 0.0, theme::BG_PANEL);
-    let mut step = grid.interval(meter).unwrap_or(TICKS_PER_QUARTER / 4);
+    ruler_painter.rect_filled(ruler, 0.0, theme::RULER);
+    ruler_painter.hline(
+        ruler.x_range(),
+        ruler.top() + 0.5,
+        Stroke::new(1.0, Color32::from_white_alpha(8)),
+    );
+    let bar = meter.ticks_per_bar();
+    let beat = meter.ticks_per_beat();
+    // Beat lines show whatever the snap; finer lines follow it. Lines stay at least 8 px apart.
+    let mut step = grid
+        .interval(meter)
+        .unwrap_or(TICKS_PER_QUARTER / 4)
+        .min(beat);
     while step as f64 * geo.pixels_per_tick < 8.0 {
-        let Some(next) = step.checked_mul(2) else {
+        let next = if step < beat {
+            Some(step.saturating_mul(2).min(beat))
+        } else if step < bar {
+            Some(bar)
+        } else {
+            step.checked_mul(2)
+        };
+        let Some(next) = next else {
             break;
         };
         step = next;
@@ -1928,17 +2151,18 @@ fn show_grid(
     let mut tick = start;
     while tick <= visible_end {
         let x = geo.x(tick);
-        let bar = tick.is_multiple_of(meter.ticks_per_bar());
-        painter.line_segment(
-            [pos2(x, geo.grid.top()), pos2(x, geo.grid.bottom())],
-            Stroke::new(
-                1.0,
-                if bar {
-                    theme::grid_bar()
-                } else {
-                    theme::grid_beat()
-                },
-            ),
+        let (line, mark, ink) = if tick.is_multiple_of(bar) {
+            (theme::grid_bar(), 8.0, theme::TEXT_FAINT)
+        } else if tick.is_multiple_of(beat) {
+            (theme::grid_beat(), 4.0, theme::TEXT_FAINT)
+        } else {
+            (theme::grid_fine(), 2.0, Color32::from_gray(0x4c))
+        };
+        painter.vline(x, geo.grid.y_range(), Stroke::new(1.0, line));
+        ruler_painter.vline(
+            x,
+            (ruler.bottom() - mark)..=ruler.bottom(),
+            Stroke::new(1.0, ink),
         );
         let Some(next) = tick.checked_add(step) else {
             break;
@@ -1949,24 +2173,96 @@ fn show_grid(
     let mut tick = geo.tick(geo.grid.left()) / ruler_step * ruler_step;
     while tick <= visible_end {
         let x = geo.x(tick);
+        let position = meter.position_at(tick);
+        let (label, font, ink) = if position.beat == 1 && position.tick == 0 {
+            (position.bar.to_string(), theme::prop(10.5), theme::TEXT)
+        } else if position.tick == 0 {
+            (
+                format!("{}.{}", position.bar, position.beat),
+                theme::prop(9.5),
+                theme::TEXT_DIM,
+            )
+        } else {
+            (
+                format::bar_beat(meter, tick),
+                theme::prop(9.5),
+                theme::TEXT_DIM,
+            )
+        };
+        // Clear of the region flags and playhead head above and the edit cursor below.
         ruler_painter.text(
-            pos2(x + 4.0, ruler.center().y),
+            pos2(x + 4.0, ruler.bottom() - 12.0),
             Align2::LEFT_CENTER,
-            format::bar_beat(meter, tick),
-            theme::mono(10.0),
-            theme::TEXT_DIM,
+            label,
+            font,
+            ink,
         );
         let Some(next) = tick.checked_add(ruler_step) else {
             break;
         };
         tick = next;
     }
-    ui.painter().rect_filled(
-        Rect::from_min_max(pos2(left, ruler.top()), pos2(ruler.left(), ruler.bottom())),
-        0.0,
-        theme::BG_PANEL,
+    let corner = Rect::from_min_max(pos2(left, ruler.top()), pos2(ruler.left(), ruler.bottom()));
+    ui.painter().rect_filled(corner, 0.0, theme::RULER);
+    ui.painter().hline(
+        left..=ruler.right(),
+        ruler.bottom() - 0.5,
+        Stroke::new(1.0, theme::BORDER),
+    );
+    ui.painter().vline(
+        corner.right() - 0.5,
+        corner.y_range(),
+        Stroke::new(1.0, theme::BORDER),
     );
     pressed_key
+}
+
+fn is_black(key: u8) -> bool {
+    matches!(key % 12, 1 | 3 | 6 | 8 | 10)
+}
+
+fn horizontal_gradient(painter: &egui::Painter, rect: Rect, left: Color32, right: Color32) {
+    let mut mesh = Mesh::default();
+    for (point, color) in [
+        (rect.left_top(), left),
+        (rect.right_top(), right),
+        (rect.right_bottom(), right),
+        (rect.left_bottom(), left),
+    ] {
+        mesh.colored_vertex(point, color);
+    }
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    painter.add(Shape::mesh(mesh));
+}
+
+/// Adds `rect`, rounded on its right side and shaded from `top` to `bottom`, to `mesh`.
+fn rounded_right_gradient(mesh: &mut Mesh, rect: Rect, radius: f32, top: Color32, bottom: Color32) {
+    let radius = radius.min(rect.height() / 2.0).min(rect.width()).max(0.0);
+    let shade = |y: f32| {
+        top.lerp_to_gamma(
+            bottom,
+            ((y - rect.top()) / rect.height().max(1.0)).clamp(0.0, 1.0),
+        )
+    };
+    let hub = mesh.vertices.len() as u32;
+    mesh.colored_vertex(rect.center(), shade(rect.center().y));
+    mesh.colored_vertex(rect.left_top(), shade(rect.top()));
+    for (center, from) in [
+        (pos2(rect.right() - radius, rect.top() + radius), -90.0_f32),
+        (pos2(rect.right() - radius, rect.bottom() - radius), 0.0),
+    ] {
+        for step in 0..=3 {
+            let angle = (from + 30.0 * step as f32).to_radians();
+            let point = center + radius * vec2(angle.cos(), angle.sin());
+            mesh.colored_vertex(point, shade(point.y));
+        }
+    }
+    mesh.colored_vertex(rect.left_bottom(), shade(rect.bottom()));
+    let count = mesh.vertices.len() as u32 - hub - 1;
+    for index in 0..count {
+        mesh.add_triangle(hub, hub + 1 + index, hub + 1 + (index + 1) % count);
+    }
 }
 
 fn paint_notes(
@@ -2019,7 +2315,8 @@ fn paint_notes(
             Id::new(("piano-note", index)),
             Sense::hover(),
         );
-        let fill = if selected.contains(&index) {
+        let chosen = selected.contains(&index);
+        let fill = if chosen {
             theme::tint(color, Color32::WHITE, 0.45)
         } else {
             theme::tint(
@@ -2028,20 +2325,27 @@ fn paint_notes(
                 0.45 + 0.55 * f32::from(note.velocity) / 127.0,
             )
         };
+        let outline = if chosen {
+            Color32::WHITE
+        } else {
+            theme::tint(fill, Color32::BLACK, 0.5)
+        };
+        // A note too short to show its corners stays a plain quad, which is cheaper.
+        let radius = if rect.width() >= 6.0 { 2.0 } else { 0.0 };
         painter.rect(
             rect,
-            0.0,
+            radius,
             fill,
-            Stroke::new(
-                1.0,
-                if selected.contains(&index) {
-                    Color32::WHITE
-                } else {
-                    Color32::from_black_alpha(160)
-                },
-            ),
+            Stroke::new(1.0, outline),
             StrokeKind::Inside,
         );
+        if rect.width() > 6.0 {
+            painter.hline(
+                (rect.left() + 2.0)..=(rect.right() - 2.0),
+                rect.top() + 1.5,
+                Stroke::new(1.0, Color32::from_white_alpha(40)),
+            );
+        }
         if rect.width() > 32.0 {
             painter.with_clip_rect(rect.intersect(geo.grid)).text(
                 pos2(rect.left() + 4.0, rect.center().y),
@@ -2051,7 +2355,7 @@ fn paint_notes(
                 theme::TEXT_ON_COLOR,
             );
         }
-        if selected.contains(&index) {
+        if chosen {
             let handle = slide_handle(geo, note);
             painter.circle_filled(handle, 3.5, Color32::WHITE);
             painter.circle_stroke(
@@ -2083,6 +2387,7 @@ fn paint_region(
     velocity: Rect,
     region: (u64, u64),
     extent: u64,
+    color: Color32,
 ) {
     let shade = Color32::from_black_alpha(110);
     let (start, end) = (geo.x(region.0), geo.x(region.1));
@@ -2099,15 +2404,17 @@ fn paint_region(
             painter.rect_filled(lane.with_min_x(past), 0.0, shade);
         }
     }
+    // The clip's own bounds take its colour; yellow is kept for the cycle.
+    let mark = theme::tint(color, Color32::WHITE, 0.35);
     let painter = ui.painter().with_clip_rect(ruler);
     for (x, toward) in [(start, 1.0), (end, -1.0)] {
-        painter.vline(x, ruler.y_range(), Stroke::new(1.0, theme::LOOP));
+        painter.vline(x, ruler.y_range(), Stroke::new(1.0, mark));
         let flag = vec![
             pos2(x, ruler.top() + 2.0),
             pos2(x + 7.0 * toward, ruler.top() + 6.0),
             pos2(x, ruler.top() + 10.0),
         ];
-        painter.add(egui::Shape::convex_polygon(flag, theme::LOOP, Stroke::NONE));
+        painter.add(egui::Shape::convex_polygon(flag, mark, Stroke::NONE));
     }
 }
 
@@ -2119,6 +2426,7 @@ fn velocity_y(lane: Rect, value: u8) -> f32 {
     lane.bottom() - VELOCITY_PADDING - f32::from(value) / 127.0 * velocity_range_height(lane)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_velocity(
     ui: &Ui,
     geo: Geometry,
@@ -2127,17 +2435,12 @@ fn paint_velocity(
     notes: &[MidiNote],
     selected: &BTreeSet<usize>,
     track_color: Color32,
+    meter: TimeSignature,
 ) {
     let painter = ui.painter().with_clip_rect(lane);
     painter.rect_filled(lane, 0.0, theme::BG_DEEP);
-    let axis = Rect::from_min_max(pos2(left, lane.top()), lane.left_bottom());
-    let axis_painter = ui.painter().with_clip_rect(axis);
-    axis_painter.rect_filled(axis, 0.0, theme::BG_PANEL);
-    axis_painter.vline(
-        axis.right() - 0.5,
-        velocity_y(lane, 127)..=velocity_y(lane, 0),
-        Stroke::new(1.0, theme::BORDER),
-    );
+    paint_bar_bands(&painter, geo, lane, meter);
+    let (axis_painter, axis) = lane_axis(ui, lane, left);
     let ticks: &[u8] = if lane.height() >= 96.0 {
         &[0, 32, 64, 96, 127]
     } else {
@@ -2146,33 +2449,82 @@ fn paint_velocity(
     for &value in ticks {
         let y = velocity_y(lane, value);
         painter.hline(lane.x_range(), y, Stroke::new(1.0, theme::grid_beat()));
-        axis_painter.hline(
-            axis.right() - 5.0..=axis.right(),
-            y,
-            Stroke::new(1.0, theme::TEXT_DIM),
-        );
-        axis_painter.text(
-            pos2(axis.right() - 8.0, y),
-            Align2::RIGHT_CENTER,
-            value.to_string(),
-            theme::mono(9.0),
-            theme::TEXT_DIM,
-        );
+        axis_tick(&axis_painter, axis, y, &value.to_string());
     }
-    for (index, note) in notes.iter().enumerate() {
+    let base = velocity_y(lane, 0);
+    let head = |index: &usize| {
+        let note = notes.get(*index)?;
         let x = geo.x(note.start_tick);
-        let y = velocity_y(lane, note.velocity);
-        let color = if selected.contains(&index) {
-            theme::ACCENT
-        } else {
-            track_color
-        };
-        painter.line_segment(
-            [pos2(x, velocity_y(lane, 0)), pos2(x, y)],
-            Stroke::new(2.0, color),
-        );
-        painter.circle_filled(pos2(x, y), 3.0, color);
+        ((lane.left() - 4.0)..=(lane.right() + 4.0))
+            .contains(&x)
+            .then(|| pos2(x, velocity_y(lane, note.velocity)))
+    };
+    let mut selection = selected.iter().copied().peekable();
+    let (mut plain, mut chosen) = (Vec::new(), Vec::new());
+    for index in 0..notes.len() {
+        let picked = selection.next_if_eq(&index).is_some();
+        if let Some(head) = head(&index) {
+            if picked { &mut chosen } else { &mut plain }.push(head);
+        }
     }
+    // Selected stems last, so they stay on top where notes share a start.
+    lollipops(&painter, plain.iter().copied(), base, track_color);
+    lollipops(&painter, chosen.iter().copied(), base, theme::SELECT);
+}
+
+/// Stems, then rims, then fills, so the heads of a chord merge under one outline.
+fn lollipops(
+    painter: &egui::Painter,
+    heads: impl Iterator<Item = Pos2> + Clone,
+    base: f32,
+    color: Color32,
+) {
+    for head in heads.clone() {
+        painter.line_segment([pos2(head.x, base), head], Stroke::new(2.0, color));
+    }
+    // Radii up to 3.3 stay pre-rendered discs at 2x; larger ones become paths.
+    let rim = theme::tint(color, Color32::BLACK, 0.6);
+    for head in heads.clone() {
+        painter.circle_filled(head, 3.3, rim);
+    }
+    for head in heads {
+        painter.circle_filled(head, 2.3, color);
+    }
+}
+
+/// Fills the value axis left of a lane, under the keyboard, closes the lane's bottom
+/// edge and returns the axis painter.
+fn lane_axis(ui: &Ui, lane: Rect, left: f32) -> (egui::Painter, Rect) {
+    let axis = Rect::from_min_max(pos2(left, lane.top()), lane.left_bottom());
+    let painter = ui.painter().with_clip_rect(axis);
+    painter.rect_filled(axis, 0.0, theme::BG_PANEL);
+    painter.vline(
+        axis.right() - 0.5,
+        axis.y_range(),
+        Stroke::new(1.0, theme::BORDER),
+    );
+    // Bright bars would otherwise run straight into the panel below.
+    ui.painter().hline(
+        left..=lane.right(),
+        lane.bottom() - 0.5,
+        Stroke::new(1.0, theme::BORDER),
+    );
+    (painter, axis)
+}
+
+fn axis_tick(painter: &egui::Painter, axis: Rect, y: f32, label: &str) {
+    painter.hline(
+        (axis.right() - 5.0)..=(axis.right() - 1.0),
+        y,
+        Stroke::new(1.0, theme::TEXT_FAINT),
+    );
+    painter.text(
+        pos2(axis.right() - 8.0, y),
+        Align2::RIGHT_CENTER,
+        label,
+        theme::mono(9.0),
+        theme::TEXT_DIM,
+    );
 }
 
 #[cfg(test)]

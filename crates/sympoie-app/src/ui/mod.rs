@@ -1,4 +1,5 @@
 pub mod analog;
+pub mod bars;
 pub mod brand;
 pub mod format;
 pub mod rack;

@@ -10,8 +10,6 @@ use crate::actions::Action;
 use crate::state::ArrangementState;
 use crate::ui::{analog, theme, widgets};
 
-const RED: Color32 = Color32::from_rgb(238, 91, 94);
-
 #[path = "automation_targets.rs"]
 mod targets;
 #[path = "automation_value.rs"]
@@ -108,38 +106,49 @@ impl Editor {
 pub(super) fn toggle(ui: &mut Ui, enabled: bool, actions: &mut Vec<Action>) {
     let (rect, _) = ui.allocate_exact_size(vec2(138.0, 24.0), Sense::hover());
     let response = ui.interact(rect, Id::new("automation-toggle"), Sense::click());
-    let cap = analog::push_button(
+    let light = enabled.then_some(theme::SELECT);
+    let cap = analog::key(
         ui.painter(),
-        rect.shrink(1.0),
-        2.0,
-        enabled.then_some(RED),
+        rect.shrink2(vec2(1.0, 2.0)),
+        4.0,
+        light,
         response.hovered(),
         response.is_pointer_button_down_on(),
     );
-    let ink = if enabled {
-        theme::TEXT_ON_COLOR
-    } else {
-        theme::TEXT
-    };
+    let ink = widgets::key_ink(light, response.hovered());
+    envelope_glyph(
+        ui.painter(),
+        Rect::from_center_size(cap.left_center() + vec2(15.0, 0.0), vec2(14.0, 9.0)),
+        ink,
+    );
     ui.painter().text(
-        cap.left_center() + vec2(10.0, 0.0),
+        cap.left_center() + vec2(28.0, 0.0),
         Align2::LEFT_CENTER,
         "Automation",
         theme::prop(11.0),
         ink,
     );
     ui.painter().text(
-        cap.right_center() - vec2(10.0, 0.0),
+        cap.right_center() - vec2(9.0, 0.0),
         Align2::RIGHT_CENTER,
         "A",
         theme::mono(10.0),
-        ink.gamma_multiply(0.7),
+        ink.gamma_multiply(0.6),
     );
     response.clone().on_hover_text(
         "Show or hide automation envelopes · A\nClick to add points; drag to shape an envelope.",
     );
     if response.clicked() {
         actions.push(Action::ToggleAutomation);
+    }
+}
+
+fn envelope_glyph(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let at = |x: f32, y: f32| rect.lerp_inside(vec2(x, y));
+    let points = [at(0.0, 0.9), at(0.3, 0.1), at(0.64, 0.75), at(1.0, 0.3)];
+    painter.add(Shape::line(points.to_vec(), Stroke::new(1.2, color)));
+    for point in &points[1..3] {
+        painter.circle_filled(*point, 1.8, color);
     }
 }
 
@@ -185,7 +194,7 @@ pub(super) fn selector(
             4.5,
             existing
                 .filter(|lane| lane.enabled() && !lane.points().is_empty())
-                .map(|_| RED),
+                .map(|_| theme::ACCENT),
             response.hovered(),
             response.is_pointer_button_down_on(),
         );
@@ -200,14 +209,16 @@ pub(super) fn selector(
         response.on_hover_text(
             "Enable or disable this envelope\nAn envelope takes control when it has points.",
         );
-        targets::selector(
+        let selector = targets::selector(
             ui,
             (area.width() - 26.0).max(80.0),
             index,
             track,
             &mut target,
-        )
-        .context_menu(|ui| envelope_menu(ui, index, target, existing, actions));
+        );
+        widgets::context_menu(&selector, |ui| {
+            envelope_menu(ui, index, target, existing, actions)
+        });
         state.automation_targets.insert(index, target);
     });
 }
@@ -376,6 +387,7 @@ fn point_value_menu(
         .desired_width(180.0)
         .hint_text(value_edit::hint(edit.selected.target))
         .show(ui);
+    widgets::ring_focus(ui, &field.response);
     if edit.focus {
         field.response.request_focus();
         field.state.cursor.set_char_range(Some(CCursorRange::two(
@@ -425,7 +437,10 @@ fn point_value_menu(
         }
     }
     if edit.invalid {
-        ui.colored_label(RED, "Enter a valid value in the range shown above.");
+        ui.colored_label(
+            theme::ERROR,
+            "Enter a valid value in the range shown above.",
+        );
     }
 }
 
@@ -549,6 +564,7 @@ pub(super) fn lane(
         }
     }
     egui::Popup::context_menu(&response)
+        .style(widgets::menu_style())
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
             if let Some(edit) = editor
@@ -579,10 +595,12 @@ pub(super) fn lane(
         .filter(|drag| drag.track == index && drag.target == target)
         .map_or(base_points, |drag| drag.points.as_slice());
     let painter = ui.painter_at(lane);
-    let color = if enabled && !points.is_empty() {
-        RED
+    let active = enabled && !points.is_empty();
+    let curve = theme::tint(theme::track_color(project, index), Color32::WHITE, 0.3);
+    let color = if active {
+        curve
     } else {
-        RED.gamma_multiply(0.45)
+        curve.gamma_multiply(0.45)
     };
     for value in [0.0, 0.5, 1.0] {
         let y = plot.bottom() - plot.height() * value;
@@ -602,13 +620,18 @@ pub(super) fn lane(
             );
             x += 9.0;
         }
-        painter.text(
-            lane.left_top() + vec2(8.0, 3.0),
-            Align2::LEFT_TOP,
+        let hint = painter.layout_no_wrap(
             format!("{}  ·  Click to add points", target.format_value(manual)),
             theme::prop(9.5),
-            theme::TEXT_FAINT,
+            theme::TEXT_DIM,
         );
+        let at = lane.left_top() + vec2(8.0, 3.0);
+        painter.rect_filled(
+            Rect::from_min_size(at, hint.size()).expand2(vec2(5.0, 1.0)),
+            3.0,
+            theme::BG_DEEP,
+        );
+        painter.galley(at, hint, theme::TEXT_DIM);
     } else {
         let (from, to) = timeline.visible();
         let first = points
@@ -651,40 +674,54 @@ pub(super) fn lane(
                 Id::new(("automation-point", index, target, point.tick)),
                 Sense::hover(),
             );
+            let radius = if selected || hover.hovered() {
+                4.0
+            } else {
+                3.0
+            };
+            if selected {
+                painter.circle_filled(pos, radius + 3.0, theme::SELECT.gamma_multiply(0.25));
+            }
+            painter.circle_filled(pos, radius + 1.0, theme::BG_DEEP);
             painter.circle_filled(
                 pos,
-                if selected || hover.hovered() {
-                    4.0
+                radius,
+                if selected {
+                    theme::SELECT
+                } else if active {
+                    Color32::WHITE
                 } else {
-                    3.0
+                    theme::TEXT_DIM
                 },
-                if selected { Color32::WHITE } else { color },
             );
-            painter.circle_stroke(pos, 3.5, Stroke::new(1.0, theme::BG_DEEP));
             hover.on_hover_text(format!(
                 "{} · {}\nDrag to move · Right-click to enter a value or delete",
                 crate::ui::format::bar_beat(project.time_signature(), point.tick),
                 target.format_value(point.value)
             ));
             if selected {
-                let label = target.format_value(point.value);
-                let right = pos.x < lane.right() - 90.0;
-                let below = pos.y < lane.top() + 24.0;
-                painter.text(
-                    pos + vec2(
-                        if right { 8.0 } else { -8.0 },
-                        if below { 6.0 } else { -5.0 },
-                    ),
-                    match (right, below) {
-                        (true, true) => Align2::LEFT_TOP,
-                        (true, false) => Align2::LEFT_BOTTOM,
-                        (false, true) => Align2::RIGHT_TOP,
-                        (false, false) => Align2::RIGHT_BOTTOM,
-                    },
-                    label,
+                let label = painter.layout_no_wrap(
+                    target.format_value(point.value),
                     theme::mono(10.0),
                     Color32::WHITE,
                 );
+                let right = pos.x < lane.right() - 90.0;
+                let below = pos.y < lane.top() + 24.0;
+                let tag = match (right, below) {
+                    (true, true) => Align2::LEFT_TOP,
+                    (true, false) => Align2::LEFT_BOTTOM,
+                    (false, true) => Align2::RIGHT_TOP,
+                    (false, false) => Align2::RIGHT_BOTTOM,
+                }
+                .anchor_size(
+                    pos + vec2(
+                        if right { 9.0 } else { -9.0 },
+                        if below { 7.0 } else { -6.0 },
+                    ),
+                    label.size(),
+                );
+                painter.rect_filled(tag.expand2(vec2(4.0, 1.0)), 3.0, theme::BG_DEEP);
+                painter.galley(tag.min, label, Color32::WHITE);
             }
         }
     }

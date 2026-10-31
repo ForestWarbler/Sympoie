@@ -274,7 +274,7 @@ impl SympoieApp {
         Panel::top("menu-bar")
             .frame(
                 Frame::NONE
-                    .fill(theme::BG_DEEP)
+                    .fill(theme::CONTROL_TOP)
                     .inner_margin(Margin::symmetric(6, 1)),
             )
             .show(ui, |ui| self.menu_bar(ui, &mut actions));
@@ -285,11 +285,11 @@ impl SympoieApp {
             self.arrangement.playback_start,
         );
         Panel::top("transport")
-            .exact_size(32.0)
+            .exact_size(46.0)
             .frame(
                 Frame::NONE
-                    .fill(theme::BG_PANEL)
-                    .inner_margin(Margin::symmetric(8, 6)),
+                    .fill(theme::CONTROL_BOTTOM)
+                    .inner_margin(Margin::symmetric(10, 5)),
             )
             .show(ui, |ui| {
                 let inputs = transport_bar::Inputs {

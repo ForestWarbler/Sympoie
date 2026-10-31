@@ -1,5 +1,6 @@
 use eframe::egui::{
-    self, Align, Key, KeyboardShortcut, Layout, Modifiers, RichText, Sense, Stroke, Ui, pos2, vec2,
+    self, Align, Color32, Key, KeyboardShortcut, Layout, Modifiers, RichText, Sense, Shape, Stroke,
+    Style, Ui, UiBuilder, pos2, vec2,
 };
 use sympoie::SAMPLE_RATE;
 use sympoie::plugin::PluginKind;
@@ -10,11 +11,51 @@ use super::{DetailView, NoticeKind, SympoieApp, file_name};
 use crate::actions::Action;
 use crate::document::edit::TrackKind;
 use crate::state::{self, GridMode};
-use crate::ui::{format, theme, widgets};
+use crate::ui::{analog, format, rack, theme, widgets};
 use crate::views::arrangement::grid_menu;
+
+/// Menu titles: plain text that takes the blue highlight while hovered or open.
+fn menu_titles(style: &mut Style) {
+    egui::menu::menu_style(style);
+    style.spacing.button_padding = vec2(7.0, 1.0);
+    style.spacing.item_spacing.x = 1.0;
+    widgets::menu_highlight(style);
+    // The lit title sits inset in the strip, clear of its edges.
+    let widgets = &mut style.visuals.widgets;
+    for state in [&mut widgets.hovered, &mut widgets.active, &mut widgets.open] {
+        state.expansion = -1.0;
+    }
+}
+
+/// A menu bar title that keeps its highlight while its menu is open.
+fn menu_title(ui: &mut Ui, title: &str, contents: impl FnOnce(&mut Ui)) {
+    let open = egui::Popup::is_id_open(ui.ctx(), ui.next_auto_id().with("popup"));
+    let inactive = ui.visuals().widgets.inactive;
+    if open {
+        ui.visuals_mut().widgets.inactive = ui.visuals().widgets.open;
+    }
+    ui.menu_button(title, contents);
+    ui.visuals_mut().widgets.inactive = inactive;
+}
+
+/// A short engraved rule between groups of the status bar.
+fn divider(ui: &mut Ui) {
+    let (rect, _) = ui.allocate_exact_size(vec2(9.0, 14.0), Sense::hover());
+    rack::rule_vertical(
+        ui.painter(),
+        rect.center().x.round() - 0.5,
+        rect.top()..=rect.bottom(),
+    );
+}
 
 impl SympoieApp {
     pub(super) fn menu_bar(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        let strip = ui.max_rect().expand2(vec2(6.0, 1.0));
+        ui.painter().hline(
+            strip.x_range(),
+            strip.top() + 0.5,
+            Stroke::new(1.0, Color32::from_white_alpha(12)),
+        );
         let shortcut = |ui: &Ui, modifiers: Modifiers, key: Key| {
             ui.ctx()
                 .format_shortcut(&KeyboardShortcut::new(modifiers, key))
@@ -23,11 +64,23 @@ impl SympoieApp {
         let command_shift = Modifiers::COMMAND | Modifiers::SHIFT;
         let command_alt = Modifiers::COMMAND | Modifiers::ALT;
         let item = |ui: &mut Ui, label: &str, keys: String, enabled: bool| {
+            // A coloured shortcut keeps its colour on the blue hover row, so whiten it
+            // when the row about to be added (whose id is next) was hovered last frame.
+            let lit = enabled
+                && ui
+                    .ctx()
+                    .read_response(ui.next_auto_id())
+                    .is_some_and(|row| row.hovered());
+            let keys =
+                RichText::new(keys).color(if lit { Color32::WHITE } else { theme::TEXT_DIM });
             ui.add_enabled(enabled, egui::Button::new(label).shortcut_text(keys))
                 .clicked()
         };
-        egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("File", |ui| {
+        let bar = egui::MenuBar::new()
+            .style(menu_titles)
+            .config(egui::menu::MenuConfig::new().style(widgets::menu_style()));
+        bar.ui(ui, |ui| {
+            menu_title(ui, "File", |ui| {
                 if item(ui, "New Project", shortcut(ui, command, Key::N), true) {
                     actions.push(Action::NewProject);
                 }
@@ -59,7 +112,7 @@ impl SympoieApp {
                     actions.push(Action::Quit);
                 }
             });
-            ui.menu_button("Edit", |ui| {
+            menu_title(ui, "Edit", |ui| {
                 let undo = self
                     .document
                     .undo_label()
@@ -175,7 +228,7 @@ impl SympoieApp {
                     actions.push(Action::DeleteTrack(*index));
                 }
             });
-            ui.menu_button("Create", |ui| {
+            menu_title(ui, "Create", |ui| {
                 if item(
                     ui,
                     "Insert Audio Track",
@@ -266,7 +319,7 @@ impl SympoieApp {
                     });
                 }
             });
-            ui.menu_button("View", |ui| {
+            menu_title(ui, "View", |ui| {
                 if item(
                     ui,
                     if self.arrangement.automation {
@@ -341,15 +394,15 @@ impl SympoieApp {
                     grid_menu(ui, self.arrangement.grid, self.document.project(), actions);
                 });
                 ui.separator();
-                ui.label(RichText::new("Track height").color(theme::TEXT_DIM));
+                widgets::menu_caption(ui, "Track height");
                 for (label, height) in [("Compact", 46.0), ("Normal", 68.0), ("Large", 104.0)] {
-                    if ui
-                        .radio(
-                            self.arrangement.row_height == height
-                                && self.arrangement.track_heights.is_empty(),
-                            label,
-                        )
-                        .clicked()
+                    if widgets::radio_choice(
+                        ui,
+                        self.arrangement.row_height == height
+                            && self.arrangement.track_heights.is_empty(),
+                        label,
+                    )
+                    .clicked()
                     {
                         self.arrangement.set_all_track_heights(height);
                     }
@@ -358,7 +411,7 @@ impl SympoieApp {
                     actions.push(Action::ResetTrackHeights);
                 }
             });
-            ui.menu_button("Options", |ui| {
+            menu_title(ui, "Options", |ui| {
                 let playing = self.status.state == PlaybackState::Playing;
                 if item(
                     ui,
@@ -419,7 +472,7 @@ impl SympoieApp {
                     actions.push(Action::ShowSettings);
                 }
             });
-            ui.menu_button("Help", |ui| {
+            menu_title(ui, "Help", |ui| {
                 if ui.button("Keyboard Shortcuts").clicked() {
                     actions.push(Action::ShowShortcuts);
                 }
@@ -431,17 +484,25 @@ impl SympoieApp {
     }
 
     pub(super) fn status_bar(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
-        let rail = ui.max_rect().expand2(egui::vec2(8.0, 2.0));
-        crate::ui::analog::gradient_rect(ui.painter(), rail, theme::BG_RAISED, theme::BG_PANEL);
+        let rail = ui.max_rect().expand2(vec2(8.0, 2.0));
         ui.painter().hline(
             rail.x_range(),
             rail.top() + 0.5,
-            egui::Stroke::new(1.0, theme::BORDER),
+            Stroke::new(1.0, theme::BORDER),
         );
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        ui.painter().hline(
+            rail.x_range(),
+            rail.top() + 1.5,
+            Stroke::new(1.0, Color32::from_white_alpha(10)),
+        );
+        // Centred in an even-height row, the keys sit on whole pixels and keep crisp rims.
+        let mut row = ui.max_rect();
+        row.set_height((row.height() / 2.0).floor() * 2.0);
+        let layout = Layout::right_to_left(Align::Center);
+        ui.scope_builder(UiBuilder::new().max_rect(row).layout(layout), |ui| {
             ui.spacing_mut().item_spacing.x = 3.0;
             self.detail_selector(ui, actions);
-            ui.add_space(10.0);
+            divider(ui);
             let project = self.document.project();
             let seconds = project.duration_frames().unwrap_or(0) as f64 / f64::from(SAMPLE_RATE);
             let file = self
@@ -460,24 +521,27 @@ impl SympoieApp {
             if let Some(path) = self.document.path() {
                 summary.on_hover_text(path.display().to_string());
             }
-            ui.add_space(10.0);
+            divider(ui);
             self.grid_indicator(ui, actions);
-            ui.add_space(8.0);
+            divider(ui);
             self.agent_switch(ui, actions);
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                let progress = |fraction: f32| {
+                    egui::ProgressBar::new(fraction)
+                        .desired_width(160.0)
+                        .desired_height(13.0)
+                        .corner_radius(3)
+                        .fill(theme::SELECT)
+                        .show_percentage()
+                };
                 if let Some(pending) = &self.bounce {
-                    ui.add(egui::ProgressBar::new(pending.job.fraction())
-                        .desired_width(160.0).show_percentage());
+                    ui.add(progress(pending.job.fraction()));
                     ui.label(RichText::new(format!("Bouncing {}", pending.name)).color(theme::TEXT_DIM));
                     if ui.small_button("Cancel").clicked() {
                         pending.job.cancel();
                     }
                 } else if let Some(job) = &self.export {
-                    ui.add(
-                        egui::ProgressBar::new(job.fraction())
-                            .desired_width(160.0)
-                            .show_percentage(),
-                    );
+                    ui.add(progress(job.fraction()));
                     ui.label(
                         RichText::new(format!("Exporting {}", job.description()))
                             .color(theme::TEXT_DIM),
@@ -487,7 +551,7 @@ impl SympoieApp {
                     }
                 } else if let Some(take) = &self.recording {
                     let seconds = take.clock.elapsed_frames() as f64 / f64::from(SAMPLE_RATE);
-                    ui.label(RichText::new(format!("● Recording {} · {} · Q to finish", format::duration(seconds), take.input.description())).color(theme::ERROR));
+                    ui.label(RichText::new(format!("● Recording {} · {} · Q to finish", format::duration(seconds), take.input.description())).color(theme::RECORD));
                 } else if self.engine.is_preparing_pitch() {
                     ui.spinner();
                     ui.label(RichText::new("Preparing clip pitch…").color(theme::TEXT_DIM));
@@ -548,7 +612,7 @@ impl SympoieApp {
         } else {
             "Turn on agent mode to work on this project with a coding agent: Sympoie keeps the project folder saved and loads the agent's changes as they happen.".to_owned()
         };
-        if crate::ui::rack::led_switch(ui, "AGENT", self.agent_led(now), accent)
+        if rack::led_switch(ui, "AGENT", self.agent_led(now), accent)
             .on_hover_text(hover)
             .clicked()
         {
@@ -567,16 +631,46 @@ impl SympoieApp {
             GridMode::Adaptive(density) => format!("Adaptive grid, {}", density.label()),
             GridMode::Fixed => "Fixed grid".to_owned(),
         };
+        // A small readout window, lit brighter while the pointer is over it.
+        let window = ui.painter().add(Shape::Noop);
+        let hot = ui
+            .ctx()
+            .read_response(ui.next_auto_id())
+            .is_some_and(|button| button.hovered());
         let button = ui.add(
-            egui::Button::new(RichText::new(&label).size(10.5).color(theme::TEXT_DIM))
-                .frame(false)
-                .min_size(vec2(44.0, 16.0)),
+            egui::Button::new(RichText::new(&label).font(theme::mono(10.0)).color(if hot {
+                theme::LCD_TEXT
+            } else {
+                theme::TEXT_DIM
+            }))
+            .frame(false)
+            .small()
+            .min_size(vec2(44.0, 16.0)),
         );
-        button
-            .on_hover_text(format!(
-                "{mode}: {label}\nRight-click an empty part of a lane to change it. ⌘1 narrows, ⌘2 widens."
-            ))
-            .context_menu(|ui| grid_menu(ui, self.arrangement.grid, project, actions));
+        ui.painter().set(
+            window,
+            analog::readout(button.rect.shrink2(vec2(0.0, 1.0)), hot),
+        );
+        let caption = rack::spaced(
+            ui.painter(),
+            "Grid",
+            theme::prop(8.0),
+            theme::TEXT_FAINT,
+            0.6,
+        );
+        let (slot, _) = ui.allocate_exact_size(caption.size() + vec2(1.0, 0.0), Sense::hover());
+        ui.painter().galley(
+            slot.left_center() - vec2(0.0, caption.size().y / 2.0),
+            caption,
+            theme::TEXT_FAINT,
+        );
+        let button = button.on_hover_text(format!(
+            "{mode}: {label}\nRight-click an empty part of a lane to change it. ⌘1 narrows, ⌘2 widens."
+        ));
+        // Styled through the popup, so the Fixed Grid submenu gets the same rows.
+        egui::Popup::context_menu(&button)
+            .style(widgets::menu_style())
+            .show(|ui| grid_menu(ui, self.arrangement.grid, project, actions));
     }
 
     fn detail_selector(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
@@ -586,27 +680,30 @@ impl SympoieApp {
 
         let hidden = !piano && view == DetailView::Hidden;
         let (rect, response) = ui.allocate_exact_size(vec2(18.0, 16.0), Sense::click());
-        let color = if response.hovered() {
-            egui::Color32::WHITE
-        } else {
-            theme::TEXT_DIM
-        };
-        let c = rect.center();
-        let points = if hidden {
-            vec![
-                pos2(c.x - 4.0, c.y + 2.5),
-                pos2(c.x + 4.0, c.y + 2.5),
-                pos2(c.x, c.y - 3.0),
-            ]
-        } else {
-            vec![
-                pos2(c.x - 4.0, c.y - 2.5),
-                pos2(c.x + 4.0, c.y - 2.5),
-                pos2(c.x, c.y + 3.0),
-            ]
-        };
-        ui.painter()
-            .add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+        if ui.is_rect_visible(rect) {
+            let cap = analog::key(
+                ui.painter(),
+                rect.shrink2(vec2(1.0, 1.0)),
+                3.5,
+                None,
+                response.hovered(),
+                response.is_pointer_button_down_on(),
+            );
+            let color = if response.hovered() {
+                Color32::WHITE
+            } else {
+                theme::TEXT
+            };
+            // Points up to open the drawer, down to close it.
+            let (c, flip) = (cap.center(), if hidden { -1.0 } else { 1.0 });
+            let points = vec![
+                pos2(c.x - 3.5, c.y - 1.8 * flip),
+                pos2(c.x + 3.5, c.y - 1.8 * flip),
+                pos2(c.x, c.y + 2.2 * flip),
+            ];
+            ui.painter()
+                .add(Shape::convex_polygon(points, color, Stroke::NONE));
+        }
         if response
             .on_hover_text(if hidden {
                 "Open the bottom drawer"
@@ -618,45 +715,50 @@ impl SympoieApp {
             actions.push(Action::ToggleDetailView);
         }
 
-        let mixer = !piano && view == DetailView::Mixer;
-        if widgets::toggle(ui, "Mixer", mixer, theme::ACCENT, size)
-            .on_hover_text("Show the mixer")
-            .clicked()
-        {
-            actions.push(Action::ShowMixer);
-        }
-        let device = !piano && view == DetailView::Devices;
-        if widgets::toggle(ui, "Arrange", device, theme::ACCENT, size)
-            .on_hover_text("Close the bottom drawer to expand the arrangement")
-            .clicked()
-        {
-            actions.push(Action::CloseDrawer);
-        }
-        let clip = piano || view == DetailView::Clip;
-        if widgets::toggle(ui, "Clip", clip, theme::ACCENT, size)
-            .on_hover_text(
-                "Edit the selected clip in the drawer. Double-click a clip to open it here.",
-            )
-            .clicked()
-        {
-            actions.push(Action::ShowClipView);
-        }
+        ui.add_space(3.0);
+        widgets::key_group(ui, |ui| {
+            let mixer = !piano && view == DetailView::Mixer;
+            if widgets::toggle(ui, "Mixer", mixer, theme::SELECT, size)
+                .on_hover_text("Show the mixer")
+                .clicked()
+            {
+                actions.push(Action::ShowMixer);
+            }
+            let device = !piano && view == DetailView::Devices;
+            if widgets::toggle(ui, "Arrange", device, theme::SELECT, size)
+                .on_hover_text("Close the bottom drawer to expand the arrangement")
+                .clicked()
+            {
+                actions.push(Action::CloseDrawer);
+            }
+            let clip = piano || view == DetailView::Clip;
+            if widgets::toggle(ui, "Clip", clip, theme::SELECT, size)
+                .on_hover_text(
+                    "Edit the selected clip in the drawer. Double-click a clip to open it here.",
+                )
+                .clicked()
+            {
+                actions.push(Action::ShowClipView);
+            }
+        });
         ui.add_space(8.0);
-        if widgets::toggle(ui, "Library", self.show_browser, theme::ACCENT, size)
-            .on_hover_text("Show or hide the device and sample library beside the rack")
-            .clicked()
-        {
-            actions.push(Action::ToggleBrowser);
-        }
-        let rack = widgets::toggle(ui, "Rack", self.show_rack, theme::ACCENT, size)
-            .on_hover_text("Show or hide the selected track's Rack");
-        ui.interact(
-            rack.rect,
-            egui::Id::new("status-rack-toggle"),
-            Sense::hover(),
-        );
-        if rack.clicked() {
-            actions.push(Action::ToggleRack);
-        }
+        widgets::key_group(ui, |ui| {
+            if widgets::toggle(ui, "Library", self.show_browser, theme::SELECT, size)
+                .on_hover_text("Show or hide the device and sample library beside the rack")
+                .clicked()
+            {
+                actions.push(Action::ToggleBrowser);
+            }
+            let rack = widgets::toggle(ui, "Rack", self.show_rack, theme::SELECT, size)
+                .on_hover_text("Show or hide the selected track's Rack");
+            ui.interact(
+                rack.rect,
+                egui::Id::new("status-rack-toggle"),
+                Sense::hover(),
+            );
+            if rack.clicked() {
+                actions.push(Action::ToggleRack);
+            }
+        });
     }
 }

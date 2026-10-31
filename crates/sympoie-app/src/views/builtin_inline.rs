@@ -479,6 +479,7 @@ fn matrix(ui: &mut Ui, deck: &mut Deck) {
                 "Full depth: {depth} {unit}. Negative amount reverses modulation; LFOs span both directions."
             ));
             ui.push_id(("matrix-amount", deck.plugin.id, row), |ui| {
+                crate::ui::widgets::field_visuals(ui.style_mut());
                 let mut percent = amount * 100.0;
                 let response = ui.add_sized(
                     vec2(COLUMNS[3].1, rack::ROW),

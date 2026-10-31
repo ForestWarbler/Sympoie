@@ -5,14 +5,18 @@ use eframe::egui::{
 
 use crate::ui::{analog, theme};
 
-pub const PLATE_TOP: Color32 = Color32::from_rgb(0x32, 0x32, 0x32);
-pub const PLATE_BOTTOM: Color32 = Color32::from_rgb(0x27, 0x27, 0x27);
-pub const INK: Color32 = Color32::from_rgb(0x96, 0x96, 0x96);
-pub const INK_BRIGHT: Color32 = Color32::from_rgb(0xe3, 0xe3, 0xe3);
-pub const INK_FAINT: Color32 = Color32::from_rgb(0x62, 0x62, 0x62);
+pub const PLATE_TOP: Color32 = Color32::from_rgb(0x34, 0x34, 0x36);
+pub const PLATE_BOTTOM: Color32 = Color32::from_rgb(0x2b, 0x2b, 0x2d);
+pub const INK: Color32 = theme::TEXT_DIM;
+pub const INK_BRIGHT: Color32 = theme::TEXT;
+pub const INK_FAINT: Color32 = theme::TEXT_FAINT;
 
 pub const ROW: f32 = 16.0;
 pub const KNOB_CELL: Vec2 = vec2(40.0, 46.0);
+
+const CARD_RADIUS: f32 = 6.0;
+const KEY_RADIUS: f32 = 3.5;
+const FIELD_RADIUS: f32 = 4.0;
 
 pub fn legend_font() -> FontId {
     theme::prop(8.5)
@@ -50,66 +54,106 @@ pub fn print(painter: &Painter, pos: Pos2, align: Align2, text: &str, color: Col
     rect
 }
 
-fn gradient(rect: Rect, top: Color32, bottom: Color32) -> Shape {
-    let mut mesh = Mesh::default();
-    for (point, color) in [
-        (rect.left_top(), top),
-        (rect.right_top(), top),
-        (rect.right_bottom(), bottom),
-        (rect.left_bottom(), bottom),
-    ] {
-        mesh.colored_vertex(point, color);
+fn rounded_outline(rect: Rect, radius: f32) -> Vec<Pos2> {
+    let mut points = Vec::new();
+    egui::epaint::tessellator::path::rounded_rectangle(&mut points, rect, radius.into());
+    points
+}
+
+/// A rounded rectangle shaded from `top` to `bottom`. Meshes are not anti-aliased, so
+/// callers lay it a pixel inside an anti-aliased fill or rim of the same outline.
+fn rounded_gradient(rect: Rect, radius: f32, top: Color32, bottom: Color32) -> Shape {
+    if !rect.is_positive() {
+        return Shape::Noop;
     }
-    mesh.add_triangle(0, 1, 2);
-    mesh.add_triangle(0, 2, 3);
+    let shade = |point: Pos2| {
+        top.lerp_to_gamma(
+            bottom,
+            ((point.y - rect.top()) / rect.height()).clamp(0.0, 1.0),
+        )
+    };
+    let outline = rounded_outline(rect, radius);
+    let mut mesh = Mesh::default();
+    mesh.colored_vertex(rect.center(), shade(rect.center()));
+    for point in &outline {
+        mesh.colored_vertex(*point, shade(*point));
+    }
+    let count = outline.len() as u32;
+    for index in 0..count {
+        mesh.add_triangle(0, 1 + index, 1 + (index + 1) % count);
+    }
     Shape::mesh(mesh)
 }
 
 pub fn faceplate(rect: Rect, accent: Option<Color32>, dimmed: bool) -> Shape {
     let (top, bottom) = if dimmed {
         (
-            PLATE_TOP.lerp_to_gamma(theme::BG_PANEL, 0.6),
-            PLATE_BOTTOM.lerp_to_gamma(theme::BG_PANEL, 0.6),
+            PLATE_TOP.lerp_to_gamma(theme::BG_DEEP, 0.4),
+            PLATE_BOTTOM.lerp_to_gamma(theme::BG_DEEP, 0.4),
         )
     } else {
         (PLATE_TOP, PLATE_BOTTOM)
     };
-    let mut shapes = vec![
-        Shape::rect_filled(rect, 3.0, bottom),
-        gradient(rect.shrink(1.0), top, bottom),
-        Shape::line_segment(
-            [
-                rect.left_top() + vec2(3.0, 1.5),
-                rect.right_top() + vec2(-3.0, 1.5),
-            ],
-            Stroke::new(1.0, Color32::from_white_alpha(22)),
-        ),
-    ];
-    if let Some(accent) = accent {
-        let stripe = Rect::from_min_size(rect.min + vec2(1.0, 1.0), vec2(rect.width() - 2.0, 2.0));
-        let color = if dimmed {
-            accent.gamma_multiply(0.35)
-        } else {
-            accent.gamma_multiply(0.85)
-        };
-        shapes.push(Shape::rect_filled(stripe, 1.0, color));
+    let mut shapes = vec![Shape::rect_filled(
+        rect.translate(vec2(0.0, 1.0)),
+        CARD_RADIUS,
+        Color32::from_black_alpha(60),
+    )];
+    let body = match accent {
+        Some(accent) => {
+            let lip = 2.5;
+            // Tall enough that egui keeps the full corner radius (it clamps radii to half
+            // the shorter side); the body painted next covers all but the lip.
+            shapes.push(Shape::rect_filled(
+                rect.shrink(0.5)
+                    .with_max_y(rect.top() + lip + 2.0 * CARD_RADIUS),
+                egui::CornerRadius {
+                    sw: 0,
+                    se: 0,
+                    ..egui::CornerRadius::same(CARD_RADIUS as u8)
+                },
+                accent.gamma_multiply(if dimmed { 0.3 } else { 0.8 }),
+            ));
+            rect.with_min_y(rect.top() + lip)
+        }
+        None => rect,
+    };
+    shapes.push(Shape::rect_filled(body, CARD_RADIUS, bottom));
+    shapes.push(rounded_gradient(
+        body.shrink(1.0),
+        CARD_RADIUS - 1.0,
+        top,
+        bottom,
+    ));
+    if accent.is_none() {
+        shapes.push(Shape::hline(
+            (rect.left() + CARD_RADIUS)..=(rect.right() - CARD_RADIUS),
+            rect.top() + 1.5,
+            Stroke::new(1.0, Color32::from_white_alpha(18)),
+        ));
     }
     shapes.push(Shape::rect_stroke(
         rect,
-        3.0,
-        Stroke::new(1.0, Color32::from_black_alpha(230)),
+        CARD_RADIUS,
+        Stroke::new(1.0, Color32::from_black_alpha(210)),
         StrokeKind::Inside,
     ));
     Shape::Vec(shapes)
+}
+
+pub fn dashed_outline(painter: &Painter, rect: Rect, stroke: Stroke) {
+    let mut path = rounded_outline(rect, CARD_RADIUS);
+    path.push(path[0]);
+    painter.extend(Shape::dashed_line(&path, stroke, 4.0, 3.0));
 }
 
 pub fn rule_vertical(painter: &Painter, x: f32, y: std::ops::RangeInclusive<f32>) {
     painter.vline(
         x,
         y.clone(),
-        Stroke::new(1.0, Color32::from_black_alpha(130)),
+        Stroke::new(1.0, Color32::from_black_alpha(120)),
     );
-    painter.vline(x + 1.0, y, Stroke::new(1.0, Color32::from_white_alpha(14)));
+    painter.vline(x + 1.0, y, Stroke::new(1.0, Color32::from_white_alpha(12)));
 }
 
 pub fn section_label(ui: &mut Ui, text: &str) {
@@ -126,12 +170,12 @@ pub fn section_label(ui: &mut Ui, text: &str) {
         ui.painter().hline(
             (label.right() + 5.0)..=rect.right(),
             y,
-            Stroke::new(1.0, Color32::from_black_alpha(120)),
+            Stroke::new(1.0, Color32::from_black_alpha(110)),
         );
         ui.painter().hline(
             (label.right() + 5.0)..=rect.right(),
             y + 1.0,
-            Stroke::new(1.0, Color32::from_white_alpha(12)),
+            Stroke::new(1.0, Color32::from_white_alpha(10)),
         );
     }
 }
@@ -173,18 +217,13 @@ pub fn knob(
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         let hot = response.hovered() || response.dragged();
-        let galley = spaced(
-            painter,
-            label,
-            theme::prop(8.0),
-            if hot { INK_BRIGHT } else { INK },
-            0.1,
-        );
+        let ink = if hot { INK_BRIGHT } else { INK };
+        let galley = spaced(painter, label, theme::prop(8.0), ink, 0.1);
         if galley.size().x <= rect.width() + 2.0 {
             painter.galley(
                 pos2(rect.center().x - galley.size().x / 2.0, rect.top()),
                 galley,
-                INK,
+                ink,
             );
         } else {
             crate::ui::widgets::fitted_text(
@@ -192,7 +231,7 @@ pub fn knob(
                 Rect::from_min_size(rect.min, vec2(rect.width(), 10.0)),
                 &label.to_uppercase(),
                 theme::prop(8.0),
-                if hot { INK_BRIGHT } else { INK },
+                ink,
                 Align2::CENTER_TOP,
             );
         }
@@ -200,18 +239,27 @@ pub fn knob(
         let scale = 12.0;
         painter.add(Shape::line(
             arc_points(center, scale, -SWEEP, SWEEP),
-            Stroke::new(1.0, Color32::from_black_alpha(150)),
+            Stroke::new(2.0, Color32::from_black_alpha(150)),
         ));
         for tick in 0..=10 {
             let angle = -SWEEP + 2.0 * SWEEP * tick as f32 / 10.0;
             let direction = vec2(angle.sin(), -angle.cos());
             let major = tick == 0 || tick == 10 || (tick == 5 && bipolar);
+            // The 12 o'clock tick stays short so it clears the caption above the knob.
+            let long = major && tick != 5;
             painter.line_segment(
                 [
-                    center + direction * (scale + 1.0),
-                    center + direction * (scale + if major { 3.0 } else { 2.0 }),
+                    center + direction * (scale + 2.0),
+                    center + direction * (scale + if long { 4.0 } else { 3.0 }),
                 ],
-                Stroke::new(1.0, if major { INK } else { INK_FAINT }),
+                Stroke::new(
+                    1.0,
+                    if major {
+                        INK_FAINT
+                    } else {
+                        INK_FAINT.gamma_multiply(0.55)
+                    },
+                ),
             );
         }
         let angle = -SWEEP + value.clamp(0.0, 1.0) * 2.0 * SWEEP;
@@ -220,9 +268,9 @@ pub fn knob(
             let points = arc_points(center, scale, angle.min(start), angle.max(start));
             painter.add(Shape::line(
                 points.clone(),
-                Stroke::new(3.0, accent.gamma_multiply(0.18)),
+                Stroke::new(4.0, accent.gamma_multiply(0.16)),
             ));
-            painter.add(Shape::line(points, Stroke::new(1.5, accent)));
+            painter.add(Shape::line(points, Stroke::new(2.0, accent)));
         }
         analog::knob_cap(painter, center, 8.0, angle, hot);
         crate::ui::widgets::fitted_text(
@@ -256,16 +304,16 @@ pub fn chooser(
         let painter = ui.painter();
         let hot = response.hovered()
             || egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
-        painter.add(analog::readout(rect, hot));
+        crate::ui::widgets::field(painter, rect, hot);
         crate::ui::widgets::fitted_text(
             painter,
-            Rect::from_min_max(rect.min + vec2(5.0, 0.0), rect.max - vec2(12.0, 0.0)),
+            Rect::from_min_max(rect.min + vec2(6.0, 0.0), rect.max - vec2(14.0, 0.0)),
             options.get(selected).copied().unwrap_or("—"),
             theme::prop(9.5),
             if hot { Color32::WHITE } else { INK_BRIGHT },
             Align2::LEFT_CENTER,
         );
-        let c = pos2(rect.right() - 7.0, rect.center().y + 0.5);
+        let c = pos2(rect.right() - 8.0, rect.center().y + 0.5);
         painter.add(Shape::convex_polygon(
             vec![
                 c + vec2(-2.5, -1.5),
@@ -278,11 +326,17 @@ pub fn chooser(
     }
     let mut picked = None;
     egui::Popup::menu(&response)
+        .style(crate::ui::widgets::menu_style())
         .width(width.max(90.0))
         .show(|ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
+            // Options widen the menu rather than wrap, and the menu is never narrower
+            // than its chooser.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            let margin = f32::from(ui.style().spacing.menu_margin.left);
+            ui.set_min_width(width.max(90.0) - 2.0 * margin);
             for (index, text) in options.iter().enumerate() {
-                let option = ui.selectable_label(index == selected, *text);
+                let option = crate::ui::widgets::choice(ui, true, index == selected, text);
                 ui.interact(option.rect, option_id(index), Sense::hover());
                 if option.clicked() {
                     picked = Some(index);
@@ -294,15 +348,15 @@ pub fn chooser(
 
 pub fn led(painter: &Painter, center: Pos2, radius: f32, color: Color32, lit: bool) {
     if lit {
-        painter.circle_filled(center, radius + 2.0, color.gamma_multiply(0.18));
+        painter.circle_filled(center, radius + 2.5, color.gamma_multiply(0.14));
         painter.circle_filled(center, radius, color);
         painter.circle_filled(
             center + vec2(-0.4, -0.5),
-            radius * 0.5,
-            color.lerp_to_gamma(Color32::WHITE, 0.6),
+            radius * 0.45,
+            color.lerp_to_gamma(Color32::WHITE, 0.65),
         );
     } else {
-        painter.circle_filled(center, radius, color.lerp_to_gamma(Color32::BLACK, 0.8));
+        painter.circle_filled(center, radius, color.lerp_to_gamma(Color32::BLACK, 0.78));
     }
     painter.circle_stroke(
         center,
@@ -317,14 +371,21 @@ pub fn led_switch(ui: &mut Ui, label: &str, on: bool, accent: Color32) -> Respon
     let (rect, response) = ui.allocate_exact_size(vec2(width, ROW), Sense::click());
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        let cap = analog::push_button(
+        let cap = analog::key(
             painter,
             rect.shrink2(vec2(0.5, 1.0)),
-            2.0,
+            KEY_RADIUS,
             None,
             response.hovered(),
             response.is_pointer_button_down_on(),
         );
+        if on {
+            painter.rect_filled(
+                cap.shrink(1.0),
+                KEY_RADIUS - 1.0,
+                accent.gamma_multiply(0.16),
+            );
+        }
         led(
             painter,
             pos2(cap.left() + 7.0, cap.center().y),
@@ -333,9 +394,9 @@ pub fn led_switch(ui: &mut Ui, label: &str, on: bool, accent: Color32) -> Respon
             on,
         );
         let ink = if on || response.hovered() {
-            INK_BRIGHT
+            Color32::WHITE
         } else {
-            INK
+            INK_BRIGHT
         };
         let galley = spaced(painter, label, legend_font(), ink, 0.4);
         painter.galley(
@@ -364,7 +425,7 @@ pub fn selector_bank(
     let widths: Vec<f32> = galleys.iter().map(|g| g.size().x + 12.0).collect();
     let total: f32 = widths.iter().sum::<f32>() + 2.0;
     let (strip, _) = ui.allocate_exact_size(vec2(total, ROW), Sense::hover());
-    analog::well(&painter, strip, 2.5);
+    crate::ui::widgets::field(&painter, strip, false);
     let mut chosen = selected;
     let mut x = strip.left() + 1.0;
     for (index, width) in widths.iter().enumerate() {
@@ -375,42 +436,34 @@ pub fn selector_bank(
             chosen = index;
         }
         let engaged = index == chosen;
-        let accent = accent(index);
-        if engaged {
-            painter.rect_filled(rect, 2.0, Color32::from_gray(0x3c));
-            analog::gradient_rect(
-                &painter,
-                rect.shrink(1.0),
-                Color32::from_gray(0x44),
-                Color32::from_gray(0x30),
-            );
-            painter.hline(
-                (rect.left() + 4.0)..=(rect.right() - 4.0),
-                rect.bottom() - 1.5,
-                Stroke::new(1.5, accent),
-            );
-            painter.hline(
-                (rect.left() + 2.0)..=(rect.right() - 2.0),
-                rect.bottom() - 1.5,
-                Stroke::new(3.5, accent.gamma_multiply(0.18)),
-            );
-        } else if response.hovered() {
-            painter.rect_filled(rect, 2.0, Color32::from_white_alpha(10));
-        }
-        if index > 0 && !engaged && index != chosen + 1 {
-            painter.vline(
-                rect.left(),
-                (rect.top() + 3.0)..=(rect.bottom() - 3.0),
-                Stroke::new(1.0, Color32::from_white_alpha(14)),
-            );
-        }
         let ink = if engaged {
-            INK_BRIGHT
+            let cap = analog::key(
+                &painter,
+                rect,
+                FIELD_RADIUS - 1.0,
+                None,
+                response.hovered(),
+                response.is_pointer_button_down_on(),
+            );
+            painter.hline(
+                (cap.left() + 5.0)..=(cap.right() - 5.0),
+                cap.bottom() - 2.0,
+                Stroke::new(1.0, accent(index)),
+            );
+            Color32::WHITE
         } else if response.hovered() {
-            Color32::from_gray(0xc8)
+            painter.rect_filled(rect, FIELD_RADIUS - 1.0, Color32::from_white_alpha(10));
+            INK_BRIGHT
         } else {
             INK
         };
+        if index > 0 && !engaged && index != chosen + 1 {
+            painter.vline(
+                rect.left(),
+                (rect.top() + 3.5)..=(rect.bottom() - 3.5),
+                Stroke::new(1.0, Color32::from_white_alpha(14)),
+            );
+        }
         let galley = spaced(&painter, labels[index], legend_font(), ink, 0.5);
         painter.galley(
             rect.center() - galley.size() / 2.0 - vec2(0.0, 0.5),
@@ -421,18 +474,54 @@ pub fn selector_bank(
     chosen
 }
 
+/// A display set into the panel. Returns the area inside its rim.
 pub fn screen(painter: &Painter, rect: Rect) -> Rect {
-    analog::well(painter, rect, 3.0);
-    painter.rect_filled(rect.shrink(1.0), 2.0, Color32::from_rgb(0x0c, 0x0c, 0x0c));
-    rect.shrink(1.0)
+    let inner = rect.shrink(1.0);
+    painter.hline(
+        (rect.left() + FIELD_RADIUS)..=(rect.right() - FIELD_RADIUS),
+        rect.bottom() + 0.5,
+        Stroke::new(1.0, Color32::from_white_alpha(12)),
+    );
+    painter.rect_filled(rect, FIELD_RADIUS, Color32::from_gray(0x0e));
+    painter.add(rounded_gradient(
+        inner,
+        FIELD_RADIUS - 1.0,
+        theme::LCD.lerp_to_gamma(Color32::WHITE, 0.03),
+        theme::LCD.lerp_to_gamma(Color32::BLACK, 0.3),
+    ));
+    painter.hline(
+        (inner.left() + FIELD_RADIUS)..=(inner.right() - FIELD_RADIUS),
+        inner.top() + 0.5,
+        Stroke::new(1.0, Color32::from_black_alpha(110)),
+    );
+    painter.rect_stroke(
+        rect,
+        FIELD_RADIUS,
+        Stroke::new(1.0, Color32::from_black_alpha(200)),
+        StrokeKind::Inside,
+    );
+    inner
 }
 
+/// The faint sheen over a [`screen`], painted after its contents.
 pub fn screen_glass(painter: &Painter, rect: Rect) {
-    analog::glass(painter, rect.shrink(1.0));
+    let inner = rect.shrink(1.0);
+    analog::gradient_rect(
+        painter,
+        Rect::from_min_max(
+            pos2(inner.left() + FIELD_RADIUS, inner.top() + 1.0),
+            pos2(
+                inner.right() - FIELD_RADIUS,
+                inner.top() + inner.height() * 0.42,
+            ),
+        ),
+        Color32::from_white_alpha(9),
+        Color32::from_white_alpha(0),
+    );
 }
 
 pub fn graticule() -> Stroke {
-    Stroke::new(1.0, Color32::from_rgba_unmultiplied(0xc0, 0xc0, 0xc0, 16))
+    Stroke::new(1.0, Color32::from_rgba_unmultiplied(0xc0, 0xc0, 0xc0, 14))
 }
 
 pub fn trace(painter: &Painter, points: Vec<Pos2>, color: Color32) {
@@ -463,29 +552,49 @@ pub fn glyph_button(ui: &mut Ui, rect: Rect, id: Id, glyph: Glyph, enabled: bool
     let painter = ui.painter();
     let hot = enabled && response.hovered();
     if hot {
-        painter.rect_filled(rect, 2.0, Color32::from_white_alpha(18));
+        painter.rect_filled(
+            rect.shrink(0.5),
+            FIELD_RADIUS,
+            Color32::from_white_alpha(if response.is_pointer_button_down_on() {
+                8
+            } else {
+                16
+            }),
+        );
     }
     let color = if !enabled {
-        Color32::from_white_alpha(28)
+        Color32::from_white_alpha(30)
     } else if hot {
         if matches!(glyph, Glyph::Close) {
             theme::ERROR
         } else {
-            INK_BRIGHT
+            Color32::WHITE
         }
     } else {
         INK
     };
     let c = rect.center();
-    let stroke = Stroke::new(1.3, color);
+    let stroke = Stroke::new(1.4, color);
     match glyph {
         Glyph::Up => {
-            painter.line_segment([c + vec2(-3.5, 1.5), c + vec2(0.0, -2.0)], stroke);
-            painter.line_segment([c + vec2(0.0, -2.0), c + vec2(3.5, 1.5)], stroke);
+            painter.add(Shape::line(
+                vec![
+                    c + vec2(-3.5, 1.75),
+                    c + vec2(0.0, -1.75),
+                    c + vec2(3.5, 1.75),
+                ],
+                stroke,
+            ));
         }
         Glyph::Down => {
-            painter.line_segment([c + vec2(-3.5, -1.5), c + vec2(0.0, 2.0)], stroke);
-            painter.line_segment([c + vec2(0.0, 2.0), c + vec2(3.5, -1.5)], stroke);
+            painter.add(Shape::line(
+                vec![
+                    c + vec2(-3.5, -1.75),
+                    c + vec2(0.0, 1.75),
+                    c + vec2(3.5, -1.75),
+                ],
+                stroke,
+            ));
         }
         Glyph::Close => {
             painter.line_segment([c + vec2(-3.0, -3.0), c + vec2(3.0, 3.0)], stroke);

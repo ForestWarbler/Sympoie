@@ -227,6 +227,7 @@ pub(super) fn overview(
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, theme::BG_DEEP);
     let x = |tick: f64| rect.left() + (tick / total * f64::from(rect.width())) as f32;
+    let hot = response.hovered() || response.dragged();
 
     let tracks = project.tracks().len().saturating_sub(1).max(1);
     let band = ((rect.height() - 4.0) / tracks as f32).clamp(1.0, 4.0);
@@ -242,7 +243,7 @@ pub(super) fn overview(
                 color,
             );
         };
-        let color = theme::track_color(project, index).gamma_multiply(0.75);
+        let color = region_color(project, index).gamma_multiply(0.85);
         match track {
             Track::Audio(audio) => {
                 for clip in audio.clips() {
@@ -265,33 +266,36 @@ pub(super) fn overview(
             && matches!(track, Track::Audio(_) | Track::Midi(_))
             && let Some(start) = inputs.recording_start_tick
         {
-            paint_span(start as f64, playhead, theme::ERROR);
+            paint_span(start as f64, playhead, theme::RECORD);
         }
     }
 
     painter.rect(
         thumb,
-        2.0,
-        Color32::from_white_alpha(if response.hovered() || response.dragged() {
-            26
-        } else {
-            14
-        }),
-        Stroke::new(1.0, theme::TEXT_DIM),
+        3.0,
+        Color32::from_white_alpha(if hot { 22 } else { 10 }),
+        Stroke::new(1.0, Color32::from_white_alpha(if hot { 210 } else { 150 })),
         StrokeKind::Inside,
     );
     let grip = GRIP_WIDTH.min(thumb.width() / 4.0);
     for edge in [thumb.left() + grip / 2.0, thumb.right() - grip / 2.0] {
         painter.vline(
             edge,
-            thumb.top() + 3.0..=thumb.bottom() - 3.0,
-            Stroke::new(1.5, theme::TEXT_DIM),
+            thumb.top() + 4.0..=thumb.bottom() - 4.0,
+            Stroke::new(1.0, Color32::from_white_alpha(if hot { 200 } else { 120 })),
         );
     }
     painter.vline(
         x(state.playback_start as f64),
         rect.y_range(),
-        Stroke::new(1.0, theme::ACCENT),
+        Stroke::new(
+            1.0,
+            if inputs.status.state == PlaybackState::Playing {
+                super::START_MARKER_PLAYING
+            } else {
+                theme::PLAYHEAD
+            },
+        ),
     );
     if inputs.status.state == PlaybackState::Playing {
         painter.vline(

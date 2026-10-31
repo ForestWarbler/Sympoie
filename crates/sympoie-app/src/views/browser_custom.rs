@@ -70,15 +70,57 @@ pub(super) fn show(
     );
 }
 
-fn message(ui: &mut Ui, text: &str) {
+pub(super) fn message(ui: &mut Ui, text: &str) {
     ui.add_space(8.0);
-    ui.label(egui::RichText::new(text).size(11.0).color(theme::TEXT_DIM));
+    indented(ui, |ui| {
+        ui.label(egui::RichText::new(text).size(11.0).color(theme::TEXT_DIM));
+    });
 }
 
-fn row_rect(ui: &mut Ui, depth: usize) -> Rect {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::hover());
-    let indent = (depth as f32 * 12.0).min((rect.width() - 90.0).max(0.0));
-    rect.with_min_x(rect.left() + indent)
+fn indented(ui: &mut Ui, contents: impl FnOnce(&mut Ui)) {
+    egui::Frame::NONE
+        .inner_margin(egui::Margin::symmetric(10, 0))
+        .show(ui, contents);
+}
+
+/// Allocates a list row, returning the whole row and its part indented to `depth`.
+fn row_rect(ui: &mut Ui, depth: usize) -> (Rect, Rect) {
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::hover());
+    let indent = (depth as f32 * 12.0).min((row.width() - 90.0).max(0.0));
+    (row, row.with_min_x(row.left() + indent))
+}
+
+pub(super) fn row_highlight(painter: &egui::Painter, row: Rect, selected: bool, hovered: bool) {
+    let fill = if selected {
+        theme::SELECT_FILL
+    } else if hovered {
+        egui::Color32::from_white_alpha(8)
+    } else {
+        return;
+    };
+    painter.rect_filled(row.shrink2(vec2(4.0, 1.0)), 4.0, fill);
+}
+
+/// Paints the search field's magnifier and, while it has focus, the blue focus ring.
+pub(super) fn decorate_search(painter: &egui::Painter, field: &egui::Response) {
+    let glass = pos2(field.rect.left() + 11.0, field.rect.center().y - 0.5);
+    let ink = Stroke::new(1.2, theme::TEXT_DIM);
+    painter.circle_stroke(glass, 3.5, ink);
+    painter.line_segment([glass + vec2(2.6, 2.6), glass + vec2(5.2, 5.2)], ink);
+    if field.has_focus() {
+        widgets::focus_ring(painter, field.rect, 4.0);
+    }
+}
+
+fn audio_glyph(painter: &egui::Painter, center: egui::Pos2, color: egui::Color32) {
+    for (index, height) in [3.0, 7.0, 4.0, 6.0].into_iter().enumerate() {
+        let x = center.x - 3.0 + index as f32 * 2.0;
+        painter.vline(
+            x,
+            (center.y - height / 2.0)..=(center.y + height / 2.0),
+            Stroke::new(1.0, color),
+        );
+    }
 }
 
 fn folder(
@@ -90,7 +132,7 @@ fn folder(
     inputs: &Inputs<'_>,
     actions: &mut Vec<Action>,
 ) {
-    let rect = row_rect(ui, depth);
+    let (row, rect) = row_rect(ui, depth);
     let is_root = path == root;
     let remove_rect = Rect::from_min_max(pos2(rect.right() - ROW_HEIGHT, rect.top()), rect.max);
     let label_rect = if is_root {
@@ -119,14 +161,14 @@ fn folder(
             name.as_ref(),
         )
     });
-    if state.selected == Some(id) {
-        ui.painter()
-            .rect_filled(label_rect, 0.0, ui.visuals().selection.bg_fill);
-    } else if response.hovered() {
-        ui.painter()
-            .rect_filled(label_rect, 0.0, theme::BG_WIDGET_HOVER);
-    }
-    let center = pos2(rect.left() + 9.0, rect.center().y);
+    let selected = state.selected == Some(id);
+    row_highlight(ui.painter(), row, selected, response.hovered());
+    let ink = if selected {
+        egui::Color32::WHITE
+    } else {
+        theme::TEXT_DIM
+    };
+    let center = pos2(rect.left() + 11.0, rect.center().y);
     let points = if open {
         vec![
             center + vec2(-3.5, -2.0),
@@ -140,36 +182,33 @@ fn folder(
             center + vec2(-2.0, 3.5),
         ]
     };
-    ui.painter().add(egui::Shape::convex_polygon(
-        points,
-        theme::TEXT_DIM,
-        Stroke::NONE,
-    ));
+    ui.painter()
+        .add(egui::Shape::convex_polygon(points, ink, Stroke::NONE));
     let glyph = Rect::from_center_size(
-        pos2(rect.left() + 23.0, rect.center().y + 1.0),
+        pos2(rect.left() + 25.0, rect.center().y + 1.0),
         vec2(10.0, 7.0),
     );
-    ui.painter().rect_stroke(
-        glyph,
-        0.0,
-        Stroke::new(1.0, theme::TEXT_DIM),
-        egui::StrokeKind::Inside,
-    );
+    ui.painter()
+        .rect_stroke(glyph, 1.0, Stroke::new(1.0, ink), egui::StrokeKind::Inside);
     ui.painter().line_segment(
         [
             glyph.left_top() + vec2(0.0, -2.0),
             glyph.left_top() + vec2(5.0, -2.0),
         ],
-        Stroke::new(1.0, theme::TEXT_DIM),
+        Stroke::new(1.0, ink),
     );
     widgets::fitted_text(
         ui.painter(),
         label_rect
-            .with_min_x(rect.left() + 34.0)
+            .with_min_x(rect.left() + 36.0)
             .shrink2(vec2(2.0, 0.0)),
         &name,
         theme::prop(11.0),
-        theme::TEXT,
+        if selected {
+            egui::Color32::WHITE
+        } else {
+            theme::TEXT
+        },
         Align2::LEFT_CENTER,
     );
     response.on_hover_text(path.display().to_string());
@@ -183,15 +222,24 @@ fn folder(
             egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Remove folder from Custom")
         });
         if remove.hovered() {
-            ui.painter()
-                .rect_filled(remove_rect, 0.0, theme::BG_WIDGET_HOVER);
+            ui.painter().rect_filled(
+                remove_rect
+                    .shrink2(vec2(3.0, 2.0))
+                    .translate(vec2(-2.0, 0.0)),
+                4.0,
+                egui::Color32::from_white_alpha(18),
+            );
         }
         ui.painter().text(
-            remove_rect.center(),
+            remove_rect.center() - vec2(2.0, 0.0),
             Align2::CENTER_CENTER,
             "×",
             theme::prop(12.0),
-            theme::TEXT_DIM,
+            if remove.hovered() || selected {
+                egui::Color32::WHITE
+            } else {
+                theme::TEXT_DIM
+            },
         );
         if remove
             .on_hover_text("Remove from Custom (keeps files on disk)")
@@ -207,7 +255,9 @@ fn folder(
         Ok(entries) => entries.to_vec(),
         Err(error) => {
             message(ui, "Folder unavailable — try Refresh");
-            ui.label(egui::RichText::new(error).small().color(theme::TEXT_DIM));
+            indented(ui, |ui| {
+                ui.label(egui::RichText::new(error).small().color(theme::TEXT_DIM));
+            });
             return;
         }
     };
@@ -224,10 +274,10 @@ fn folder(
         visible += 1;
     }
     if visible == 0 {
-        let rect = row_rect(ui, depth + 1);
+        let (_, rect) = row_rect(ui, depth + 1);
         widgets::fitted_text(
             ui.painter(),
-            rect.shrink2(vec2(8.0, 0.0)),
+            rect.with_min_x(rect.left() + 34.0).shrink2(vec2(4.0, 0.0)),
             if query.is_empty() {
                 "Empty folder"
             } else {
@@ -251,7 +301,7 @@ fn file(
 ) {
     let path = entry.path.as_path();
     let name = entry.name.as_str();
-    let rect = row_rect(ui, depth);
+    let (row, rect) = row_rect(ui, depth);
     let id = Id::new(("browser-file", root, path));
     let response = ui.interact(rect, id, Sense::click());
     if response.clicked() {
@@ -262,24 +312,35 @@ fn file(
     response.widget_info(|| {
         egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, name)
     });
-    if selected {
-        ui.painter()
-            .rect_filled(rect, 0.0, ui.visuals().selection.bg_fill);
-    } else if response.hovered() {
-        ui.painter().rect_filled(rect, 0.0, theme::BG_WIDGET_HOVER);
-    }
-    widgets::fitted_text(
-        ui.painter(),
-        rect.with_min_x(rect.left() + 20.0).shrink2(vec2(4.0, 0.0)),
-        name,
-        theme::prop(11.0),
+    // Large folders lay out every row; only the visible ones are painted.
+    if ui.is_rect_visible(row) {
+        row_highlight(ui.painter(), row, selected, response.hovered());
         if supported {
-            theme::TEXT
-        } else {
-            theme::TEXT_DIM
-        },
-        Align2::LEFT_CENTER,
-    );
+            audio_glyph(
+                ui.painter(),
+                pos2(rect.left() + 25.0, rect.center().y),
+                if selected {
+                    egui::Color32::WHITE
+                } else {
+                    theme::TEXT_DIM
+                },
+            );
+        }
+        widgets::fitted_text(
+            ui.painter(),
+            rect.with_min_x(rect.left() + 34.0).shrink2(vec2(4.0, 0.0)),
+            name,
+            theme::prop(11.0),
+            if selected {
+                egui::Color32::WHITE
+            } else if supported {
+                theme::TEXT
+            } else {
+                theme::TEXT_DIM
+            },
+            Align2::LEFT_CENTER,
+        );
+    }
     let hint = if supported {
         "Double-click to load into the selected Sampler, or a new Sampler track\nDrag onto the arrangement to import it as audio"
     } else {

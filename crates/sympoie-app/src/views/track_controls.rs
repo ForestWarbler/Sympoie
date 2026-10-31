@@ -6,6 +6,7 @@ use crate::actions::Action;
 use crate::document::{edit, rows};
 use crate::ui::format;
 use crate::ui::theme;
+use crate::ui::widgets;
 
 pub use crate::document::rows::track_title;
 
@@ -176,6 +177,7 @@ pub fn route_combo(
     let mixer = *project.tracks()[index].mixer();
     let current = output_label(project, mixer.output());
     egui::ComboBox::from_id_salt(("route", index))
+        .popup_style(widgets::menu_style())
         .width(width)
         .selected_text(RichText::new(current).color(
             if mixer.output() == AudioOutput::Disconnected {
@@ -187,9 +189,7 @@ pub fn route_combo(
         .truncate()
         .show_ui(ui, |ui| {
             for (output, label) in route_choices(project, index) {
-                if ui
-                    .selectable_label(output == mixer.output(), label.as_str())
-                    .clicked()
+                if widgets::choice(ui, true, output == mixer.output(), &label).clicked()
                     && output != mixer.output()
                 {
                     actions.push(Action::SetMixer {

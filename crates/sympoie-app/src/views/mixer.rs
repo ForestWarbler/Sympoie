@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use eframe::egui::{
-    self, Align, Align2, Color32, Id, Layout, Rect, Response, RichText, Sense, Stroke, StrokeKind,
-    Ui, UiBuilder, pos2, vec2,
+    self, Align, Align2, Color32, Id, Layout, Mesh, Painter, Pos2, Rect, Response, RichText, Sense,
+    Shape, Stroke, StrokeKind, TextStyle, Ui, UiBuilder, pos2, vec2,
 };
 use sympoie::builtin::BuiltinKind;
 use sympoie::plugin::{PluginInstance, PluginKind};
@@ -25,6 +25,10 @@ const HEADER_HEIGHT: f32 = 28.0;
 const SLOT_HEIGHT: f32 = 21.0;
 const LIST_PADDING: f32 = 4.0;
 const MIN_GAIN_DB: f64 = -70.0;
+
+const STRIP_TOP: Color32 = Color32::from_rgb(0x33, 0x33, 0x34);
+const STRIP_SELECTED_BOTTOM: Color32 = Color32::from_rgb(0x3b, 0x3c, 0x3f);
+const SLOT_RADIUS: f32 = 3.5;
 
 #[path = "mixer_sends.rs"]
 mod sends;
@@ -101,7 +105,12 @@ fn show_inner(
     let full = ui.available_rect_before_wrap();
     ui.painter().rect_filled(full, 0.0, theme::BG_DEEP);
     let header = Rect::from_min_size(full.min, vec2(full.width(), HEADER_HEIGHT));
-    analog::gradient_rect(ui.painter(), header, theme::BG_RAISED, theme::BG_PANEL);
+    analog::gradient_rect(ui.painter(), header, theme::BG_RAISED, theme::RULER);
+    ui.painter().hline(
+        header.x_range(),
+        header.top() + 0.5,
+        Stroke::new(1.0, Color32::from_white_alpha(14)),
+    );
     ui.painter().hline(
         header.x_range(),
         header.bottom() - 0.5,
@@ -112,12 +121,7 @@ fn show_inner(
         header.shrink2(vec2(8.0, 3.0)),
         Layout::left_to_right(Align::Center),
         |ui| {
-            ui.label(
-                RichText::new("MIXER")
-                    .size(10.0)
-                    .strong()
-                    .color(theme::TEXT_DIM),
-            );
+            ui.label(caption("MIXER", 9.5, 1.4, theme::TEXT_DIM));
             ui.add_space(8.0);
             let add = ui.button("+ Bus").on_hover_text(
                 "Add a mixer bus. Route channels to it with their Output; buses only appear in the Mixer.",
@@ -174,6 +178,12 @@ fn show_inner(
                 let selected = selection.tracks.contains(&row.index);
                 let meter = track_meters.get_mut(row.index);
                 strip(ui, project, row.index, selected, meter, actions);
+            }
+            if ui.min_rect().right() > strips_rect.right() + 0.5 {
+                scroll_shade(
+                    ui.painter(),
+                    strips_rect.with_min_x(strips_rect.right() - 10.0),
+                );
             }
         });
 
@@ -345,48 +355,38 @@ fn strip(
             .data_mut(|data| data.remove::<String>(Id::new(("mixer-rename-buffer", index))));
     }
     egui::Popup::context_menu(&response)
+        .style(widgets::menu_style())
         .id(Id::new(("mixer-channel-menu", index)))
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| channel_menu(ui, project, index, actions));
     let track = &project.tracks()[index];
     let color = theme::track_color(project, index);
     let painter = ui.painter_at(rect);
-    painter.add(rack::faceplate(rect, None, false));
-    if selected {
-        painter.rect_filled(rect.shrink(1.0), 3.0, color.gamma_multiply(0.05));
-        painter.rect_stroke(
-            rect.shrink(0.5),
-            3.0,
-            Stroke::new(1.0, color.gamma_multiply(0.55)),
-            StrokeKind::Inside,
-        );
-    }
+    strip_body(&painter, rect, selected);
     let title = Rect::from_min_size(rect.min, vec2(rect.width(), TITLE_HEIGHT)).shrink(1.0);
-    widgets::color_bar(
+    strip_title(
         &painter,
         title,
-        if selected {
-            theme::tint(color, Color32::WHITE, 0.2)
+        if index == 0 {
+            "MASTER"
         } else {
-            color
+            rows::kind_label(track)
         },
-        &rows::track_label(project, index),
+        selected,
     );
     ui.interact(title, Id::new(("mixer-title", index)), Sense::hover())
         .on_hover_text(format!(
             "{}\nRight-click to rename or delete this channel.",
             track.name()
         ));
-    painter.text(
-        rect.center_bottom() - vec2(0.0, 4.0),
-        Align2::CENTER_BOTTOM,
-        if index == 0 {
-            "MASTER"
-        } else {
-            rows::kind_label(track)
-        },
-        theme::prop(9.5),
-        theme::TEXT_FAINT,
+    name_plate(
+        &painter,
+        Rect::from_min_max(
+            pos2(rect.left() + 6.0, rect.bottom() - 16.0),
+            pos2(rect.right() - 6.0, rect.bottom() - 3.0),
+        ),
+        color,
+        &rows::track_label(project, index),
     );
 
     let inner = Rect::from_min_max(
@@ -399,10 +399,36 @@ fn strip(
             let processing_height = (inner.height() * 0.4).clamp(82.0, 180.0);
             let inserts_height = (processing_height - 22.0) * 0.6;
             let sends_height = (processing_height - 22.0) * 0.4;
-            mixer_inserts(ui, project, index, inner.width(), inserts_height, actions);
-            sends::show(ui, project, index, inner.width(), sends_height, actions);
+            let ink = if selected {
+                theme::TEXT_DIM
+            } else {
+                theme::LCD_LABEL
+            };
+            mixer_inserts(
+                ui,
+                project,
+                index,
+                inner.width(),
+                inserts_height,
+                ink,
+                actions,
+            );
+            sends::show(
+                ui,
+                project,
+                index,
+                inner.width(),
+                sends_height,
+                ink,
+                actions,
+            );
             ui.add_space(2.0);
-            ui.separator();
+            let separator = ui.separator().rect;
+            ui.painter().hline(
+                separator.x_range(),
+                separator.center().y + 1.0,
+                Stroke::new(1.0, Color32::from_white_alpha(12)),
+            );
             let route = ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
                 ui.label(RichText::new("To").size(10.0).color(theme::TEXT_DIM));
@@ -417,7 +443,7 @@ fn strip(
                 |ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     let mute =
-                        widgets::toggle(ui, "M", mixer.muted(), theme::WARN, vec2(23.0, 20.0))
+                        widgets::toggle(ui, "M", mixer.muted(), theme::MUTE, vec2(23.0, 20.0))
                             .on_hover_text("Mute channel");
                     ui.interact(mute.rect, Id::new(("mixer-mute", index)), Sense::hover());
                     if mute.clicked() {
@@ -427,7 +453,7 @@ fn strip(
                         });
                     }
                     let solo =
-                        widgets::toggle(ui, "S", mixer.soloed(), theme::ACCENT, vec2(23.0, 20.0))
+                        widgets::toggle(ui, "S", mixer.soloed(), theme::SOLO, vec2(23.0, 20.0))
                             .on_hover_text("Solo channel");
                     ui.interact(solo.rect, Id::new(("mixer-solo", index)), Sense::hover());
                     if solo.clicked() {
@@ -454,7 +480,7 @@ fn strip(
                             ui.painter(),
                             value_rect,
                             &format::pan(pan),
-                            theme::prop(9.5),
+                            theme::mono(9.5),
                             theme::TEXT_DIM,
                             Align2::RIGHT_CENTER,
                         );
@@ -504,22 +530,33 @@ fn gain_readout(ui: &mut Ui, index: usize, mixer: MixerSettings, actions: &mut V
     let previous_db = f64::from(format::gain_to_db(mixer.gain())).max(MIN_GAIN_DB);
     let mut db = previous_db;
     let max_db = f64::from(format::gain_to_db(format::MAX_FADER_GAIN));
-    let response = ui.add_sized(
-        vec2(74.0, 20.0),
-        egui::DragValue::new(&mut db)
-            .speed(0.2)
-            .range(MIN_GAIN_DB..=max_db)
-            .clamp_existing_to_range(false)
-            .update_while_editing(false)
-            .custom_formatter(|value, _| {
-                if value <= MIN_GAIN_DB {
-                    "−∞ dB".to_owned()
-                } else {
-                    format!("{value:+.1} dB")
-                }
-            })
-            .custom_parser(|text| (!cancelled).then(|| parse_gain_db(text)).flatten()),
-    );
+    let response = ui
+        .scope(|ui| {
+            lcd_value_style(ui, 11.0);
+            let field = ui.painter().add(Shape::Noop);
+            let response = ui.add_sized(
+                vec2(74.0, 20.0),
+                egui::DragValue::new(&mut db)
+                    .speed(0.2)
+                    .range(MIN_GAIN_DB..=max_db)
+                    .clamp_existing_to_range(false)
+                    .update_while_editing(false)
+                    .custom_formatter(|value, _| {
+                        if value <= MIN_GAIN_DB {
+                            "−∞ dB".to_owned()
+                        } else {
+                            format!("{value:+.1} dB")
+                        }
+                    })
+                    .custom_parser(|text| (!cancelled).then(|| parse_gain_db(text)).flatten()),
+            );
+            ui.painter().set(
+                field,
+                analog::readout(response.rect, response.hovered() || response.dragged()),
+            );
+            response
+        })
+        .inner;
     ui.interact(
         response.rect,
         Id::new(("mixer-gain", index)),
@@ -554,7 +591,7 @@ fn list_container(ui: &mut Ui, width: f32, height: f32, id: Id) -> (Rect, Ui) {
     let height = height.max(SLOT_HEIGHT + 2.0 * LIST_PADDING);
     let (area, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
     ui.interact(area, id, Sense::hover());
-    analog::well(ui.painter(), area, 3.0);
+    slot_well(ui.painter(), area);
     let viewport = area.shrink(LIST_PADDING);
     let mut child = ui.new_child(
         UiBuilder::new()
@@ -577,12 +614,13 @@ fn channel_menu(ui: &mut Ui, project: &Project, index: usize, actions: &mut Vec<
         .ctx()
         .data_mut(|data| data.get_temp::<String>(rename_id))
         .unwrap_or_else(|| project.tracks()[index].name().to_owned());
-    ui.label("Channel name");
+    widgets::menu_caption(ui, "Channel name");
     let edit = ui.add(
         egui::TextEdit::singleline(&mut name)
             .desired_width(160.0)
             .id(Id::new(("mixer-channel-name", index))),
     );
+    widgets::ring_focus(ui, &edit);
     ui.ctx()
         .data_mut(|data| data.insert_temp(rename_id, name.clone()));
     let enter = (edit.has_focus() || edit.lost_focus())
@@ -613,11 +651,12 @@ fn mixer_inserts(
     track: usize,
     width: f32,
     height: f32,
+    ink: Color32,
     actions: &mut Vec<Action>,
 ) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 3.0;
-        ui.label(RichText::new("MIXER FX").size(9.0).color(theme::TEXT_DIM))
+        ui.label(caption("MIXER FX", 8.5, 0.8, ink))
             .on_hover_text("Mixing inserts run after the track's Rack and before channel volume. Bouncing preserves them.");
         let add = ui.small_button("+").on_hover_text("Add a mixer effect");
         ui.interact(add.rect, Id::new(("mixer-effect-plus", track)), Sense::hover());
@@ -643,11 +682,12 @@ fn mixer_inserts(
             let (end, response) =
                 ui.allocate_exact_size(vec2(ui.available_width(), SLOT_HEIGHT), Sense::click());
             ui.interact(end, Id::new(("mixer-effect-add", track)), Sense::hover());
+            let hot = response.hovered();
             ui.painter().rect(
-                end,
-                2.0,
-                theme::BG_WIDGET,
-                Stroke::new(1.0, theme::BORDER),
+                end.shrink2(vec2(0.0, 0.5)),
+                SLOT_RADIUS,
+                Color32::from_white_alpha(if hot { 14 } else { 5 }),
+                Stroke::new(1.0, Color32::from_white_alpha(if hot { 30 } else { 13 })),
                 StrokeKind::Inside,
             );
             widgets::fitted_text(
@@ -655,7 +695,7 @@ fn mixer_inserts(
                 end.shrink2(vec2(4.0, 0.0)),
                 "+ Audio FX",
                 theme::prop(10.0),
-                theme::TEXT_FAINT,
+                if hot { theme::TEXT } else { theme::TEXT_FAINT },
                 Align2::CENTER_CENTER,
             );
             if response
@@ -684,30 +724,40 @@ fn effect_slot(
         Id::new(("mixer-effect", plugin.id)),
         Sense::click_and_drag(),
     );
-    let fill = if plugin.bypassed {
-        theme::BG_WIDGET
-    } else {
-        Color32::from_rgb(48, 69, 81)
-    };
-    ui.painter().rect(
-        rect,
-        2.0,
-        fill,
-        Stroke::new(1.0, theme::BORDER),
-        StrokeKind::Inside,
+    let painter = ui.painter();
+    let cap = analog::key(
+        painter,
+        rect.shrink2(vec2(0.0, 0.5)),
+        SLOT_RADIUS,
+        None,
+        response.hovered(),
+        response.is_pointer_button_down_on(),
+    );
+    if plugin.bypassed {
+        painter.rect_filled(cap, SLOT_RADIUS, Color32::from_black_alpha(120));
+    }
+    let split = button.right() + 1.5;
+    let seam = (cap.top() + 4.0)..=(cap.bottom() - 4.0);
+    painter.vline(
+        split,
+        seam.clone(),
+        Stroke::new(1.0, Color32::from_black_alpha(120)),
+    );
+    painter.vline(
+        split + 1.0,
+        seam,
+        Stroke::new(1.0, Color32::from_white_alpha(14)),
     );
     let activator = ui.interact(
         button,
         Id::new(("mixer-effect-bypass", plugin.id)),
         Sense::click(),
     );
-    analog::round_switch(
+    power_glyph(
         ui.painter(),
         button.center(),
-        4.0,
-        (!plugin.bypassed).then_some(theme::ACCENT),
+        !plugin.bypassed,
         activator.hovered(),
-        activator.is_pointer_button_down_on(),
     );
     if activator
         .on_hover_text("Enable / bypass this mixer effect")
@@ -720,15 +770,20 @@ fn effect_slot(
     }
     widgets::fitted_text(
         ui.painter(),
-        name_rect.shrink2(vec2(3.0, 0.0)),
+        Rect::from_min_max(
+            pos2(name_rect.left() + 2.0, cap.top()),
+            pos2(cap.right() - 5.0, cap.bottom()),
+        ),
         &plugin.descriptor.name,
         theme::prop(10.0),
         if plugin.bypassed {
             theme::TEXT_DIM
+        } else if response.hovered() {
+            Color32::WHITE
         } else {
             theme::TEXT
         },
-        Align2::LEFT_CENTER,
+        Align2::CENTER_CENTER,
     );
     let builtin = BuiltinKind::from_descriptor(&plugin.descriptor).is_some();
     if builtin && response.double_clicked() {
@@ -745,8 +800,8 @@ fn effect_slot(
         track,
         id: plugin.id,
     });
-    response.context_menu(|ui| {
-        ui.label(&plugin.descriptor.name);
+    widgets::context_menu(&response, |ui| {
+        widgets::menu_caption(ui, &plugin.descriptor.name);
         let open = ui.button(if builtin {
             "Open controls"
         } else {
@@ -906,7 +961,7 @@ fn insert_drop_target(
     };
     let y = marker_y.clamp(viewport.top() + 1.0, viewport.bottom() - 1.0);
     ui.painter()
-        .hline(viewport.x_range(), y, Stroke::new(2.0, theme::ACCENT));
+        .hline(viewport.x_range(), y, Stroke::new(2.0, theme::SELECT));
     if ui.input(|input| input.pointer.any_released()) {
         egui::DragAndDrop::clear_payload(ui.ctx());
         if let Some(action) = action {
@@ -940,4 +995,148 @@ fn push_gain(actions: &mut Vec<Action>, index: usize, mixer: MixerSettings, gain
             mixer: next.with_muted(mixer.muted()).with_soloed(mixer.soloed()),
         });
     }
+}
+
+fn caption(text: &str, size: f32, tracking: f32, color: Color32) -> RichText {
+    RichText::new(text)
+        .size(size)
+        .extra_letter_spacing(tracking)
+        .color(color)
+}
+
+fn strip_body(painter: &Painter, rect: Rect, selected: bool) {
+    let (top, bottom) = if selected {
+        (theme::HEADER_SELECTED, STRIP_SELECTED_BOTTOM)
+    } else {
+        (STRIP_TOP, theme::BG_PANEL)
+    };
+    analog::gradient_rect(painter, rect, top, bottom);
+    painter.hline(
+        rect.x_range(),
+        rect.top() + 0.5,
+        Stroke::new(
+            1.0,
+            Color32::from_white_alpha(if selected { 36 } else { 16 }),
+        ),
+    );
+    painter.vline(
+        rect.left() + 0.5,
+        rect.y_range(),
+        Stroke::new(1.0, Color32::from_white_alpha(8)),
+    );
+}
+
+fn strip_title(painter: &Painter, rect: Rect, kind: &str, selected: bool) {
+    painter.rect_filled(rect, 3.0, Color32::from_black_alpha(34));
+    let ink = if selected {
+        theme::TEXT
+    } else {
+        theme::TEXT_DIM
+    };
+    let galley = rack::spaced(painter, kind, theme::prop(9.0), ink, 1.0);
+    painter.galley((rect.center() - galley.size() / 2.0).round(), galley, ink);
+}
+
+fn name_plate(painter: &Painter, rect: Rect, color: Color32, name: &str) {
+    painter.rect_filled(rect, 3.0, color);
+    painter.rect_stroke(
+        rect,
+        3.0,
+        Stroke::new(1.0, color.lerp_to_gamma(Color32::BLACK, 0.55)),
+        StrokeKind::Inside,
+    );
+    painter.hline(
+        (rect.left() + 3.0)..=(rect.right() - 3.0),
+        rect.top() + 1.5,
+        Stroke::new(1.0, Color32::from_white_alpha(56)),
+    );
+    widgets::fitted_text(
+        painter,
+        rect.shrink2(vec2(5.0, 0.0)),
+        name,
+        theme::prop(10.0),
+        widgets::track_ink(color),
+        Align2::CENTER_CENTER,
+    );
+}
+
+/// Darkens strips as they scroll under the master, which stays put.
+fn scroll_shade(painter: &Painter, rect: Rect) {
+    let mut mesh = Mesh::default();
+    for (point, color) in [
+        (rect.left_top(), Color32::TRANSPARENT),
+        (rect.right_top(), Color32::from_black_alpha(110)),
+        (rect.right_bottom(), Color32::from_black_alpha(110)),
+        (rect.left_bottom(), Color32::TRANSPARENT),
+    ] {
+        mesh.colored_vertex(point, color);
+    }
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    painter.add(Shape::mesh(mesh));
+}
+
+fn slot_well(painter: &Painter, rect: Rect) {
+    painter.rect_filled(rect, 4.0, theme::BG_WIDGET);
+    painter.hline(
+        (rect.left() + 3.0)..=(rect.right() - 3.0),
+        rect.top() + 1.5,
+        Stroke::new(1.0, Color32::from_black_alpha(100)),
+    );
+    painter.rect_stroke(
+        rect,
+        4.0,
+        Stroke::new(1.0, theme::BORDER),
+        StrokeKind::Inside,
+    );
+    painter.hline(
+        (rect.left() + 4.0)..=(rect.right() - 4.0),
+        rect.bottom() + 0.5,
+        Stroke::new(1.0, Color32::from_white_alpha(12)),
+    );
+}
+
+/// Lets a `DragValue` show its value as LCD digits over an [`analog::readout`] window.
+fn lcd_value_style(ui: &mut Ui, size: f32) {
+    let style = ui.style_mut();
+    style
+        .text_styles
+        .insert(TextStyle::Monospace, theme::mono(size));
+    style.drag_value_text_style = TextStyle::Monospace;
+    let widgets = &mut style.visuals.widgets;
+    for (state, ink) in [
+        (&mut widgets.inactive, theme::LCD_TEXT),
+        (&mut widgets.hovered, Color32::WHITE),
+        (&mut widgets.active, Color32::WHITE),
+    ] {
+        state.weak_bg_fill = Color32::TRANSPARENT;
+        state.bg_stroke = Stroke::NONE;
+        state.fg_stroke.color = ink;
+    }
+}
+
+fn power_glyph(painter: &Painter, center: Pos2, on: bool, hovered: bool) {
+    let color = match (on, hovered) {
+        (true, false) => theme::ACCENT,
+        (true, true) => theme::ACCENT.lerp_to_gamma(Color32::WHITE, 0.35),
+        (false, false) => theme::TEXT_FAINT,
+        (false, true) => theme::TEXT,
+    };
+    if on {
+        painter.circle_filled(center, 6.0, theme::ACCENT.gamma_multiply(0.1));
+    }
+    let radius = 3.6;
+    let gap = 0.75;
+    let points = (0..=12)
+        .map(|step| {
+            let t = gap + (std::f32::consts::TAU - 2.0 * gap) * step as f32 / 12.0;
+            center + radius * vec2(t.sin(), -t.cos())
+        })
+        .collect();
+    let stroke = Stroke::new(1.3, color);
+    painter.add(Shape::line(points, stroke));
+    painter.line_segment(
+        [center - vec2(0.0, radius + 1.0), center - vec2(0.0, 0.8)],
+        stroke,
+    );
 }

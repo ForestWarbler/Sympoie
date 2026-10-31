@@ -872,7 +872,7 @@ fn chorus_buttons_compact(ui: &mut Ui, deck: &mut Deck, origin: Pos2, s: f32) {
     let mode = deck.value(CHORUS).round() as u32;
     silk(
         ui.painter(),
-        origin - vec2(0.0, 6.0 * s),
+        origin - vec2(0.0, 9.5 * s),
         Align2::LEFT_BOTTOM,
         "Chorus",
         6.0 * s,

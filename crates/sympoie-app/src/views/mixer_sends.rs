@@ -1,12 +1,13 @@
 use eframe::egui::{
-    self, Align, Align2, Id, Layout, Rect, RichText, Sense, Stroke, Ui, pos2, vec2,
+    self, Align, Align2, Color32, Id, Layout, Painter, Rect, RichText, Sense, Shape, Stroke,
+    StrokeKind, Ui, pos2, vec2,
 };
 use sympoie::project::Project;
 use sympoie::track::{BusTrackId, TrackId};
 
 use crate::actions::Action;
 use crate::document::rows;
-use crate::ui::{format, theme, widgets};
+use crate::ui::{analog, format, theme, widgets};
 
 const ROW_HEIGHT: f32 = 21.0;
 const SEND_HINT: &str = "Send a copy to a bus, after channel volume, pan and mute. The channel's Output stays unchanged.";
@@ -44,11 +45,12 @@ pub(super) fn show(
     source: usize,
     width: f32,
     height: f32,
+    ink: Color32,
     actions: &mut Vec<Action>,
 ) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 3.0;
-        ui.label(RichText::new("SENDS").size(9.0).color(theme::TEXT_DIM))
+        ui.label(super::caption("SENDS", 8.5, 0.8, ink))
             .on_hover_text(SEND_HINT);
         if source != 0 {
             let add = ui.small_button("+").on_hover_text("Add a send to a bus");
@@ -58,6 +60,7 @@ pub(super) fn show(
                 Sense::hover(),
             );
             egui::Popup::menu(&add)
+                .style(widgets::menu_style())
                 .id(Id::new(("mixer-send-menu", source)))
                 .show(|ui| {
                     let choices = destinations(project, source);
@@ -142,12 +145,13 @@ fn send_row(
     );
     let name_rect = Rect::from_min_max(row.min, pos2(level_rect.left() - 2.0, row.bottom()));
     let name = rows::track_title(&project.tracks()[bus]);
+    slot_plate(ui.painter(), row);
     widgets::fitted_text(
         ui.painter(),
-        name_rect,
+        name_rect.with_min_x(name_rect.left() + 5.0),
         &name,
         theme::prop(9.5),
-        theme::TEXT_DIM,
+        theme::TEXT,
         Align2::LEFT_CENTER,
     );
     ui.interact(
@@ -158,11 +162,10 @@ fn send_row(
     .on_hover_text(format!("{}\n{SEND_HINT}", rows::track_label(project, bus)));
     widgets::inside(ui, level_rect, Layout::left_to_right(Align::Center), |ui| {
         ui.push_id(("mixer-send-value", source, bus), |ui| {
-            ui.style_mut()
-                .text_styles
-                .insert(egui::TextStyle::Monospace, theme::mono(9.5));
+            super::lcd_value_style(ui, 9.5);
             ui.spacing_mut().button_padding.x = 3.0;
             ui.spacing_mut().interact_size.x = 48.0;
+            let field = ui.painter().add(Shape::Noop);
             let mut db = format::gain_to_db(gain).max(-70.0);
             let response = ui.add_sized(
                 level_rect.size(),
@@ -184,6 +187,13 @@ fn send_row(
                             text.parse().ok()
                         }
                     }),
+            );
+            ui.painter().set(
+                field,
+                analog::readout(
+                    level_rect.shrink2(vec2(0.0, 2.5)),
+                    response.hovered() || response.dragged(),
+                ),
             );
             ui.interact(
                 response.rect,
@@ -213,8 +223,11 @@ fn send_row(
         Sense::click(),
     );
     if remove.hovered() {
-        ui.painter()
-            .rect_filled(remove_rect, 2.0, theme::BG_WIDGET_HOVER);
+        ui.painter().rect_filled(
+            remove_rect.shrink2(vec2(0.5, 3.0)),
+            2.5,
+            Color32::from_white_alpha(20),
+        );
     }
     let icon = remove_rect.shrink2(vec2(3.0, 7.0));
     let stroke = Stroke::new(
@@ -235,4 +248,20 @@ fn send_row(
     {
         actions.push(Action::RemoveTrackSend { track: source, bus });
     }
+}
+
+fn slot_plate(painter: &Painter, rect: Rect) {
+    let rect = rect.shrink2(vec2(0.0, 0.5));
+    painter.rect_filled(rect, super::SLOT_RADIUS, Color32::from_gray(0x37));
+    painter.hline(
+        (rect.left() + 3.0)..=(rect.right() - 3.0),
+        rect.top() + 1.5,
+        Stroke::new(1.0, Color32::from_white_alpha(14)),
+    );
+    painter.rect_stroke(
+        rect,
+        super::SLOT_RADIUS,
+        Stroke::new(1.0, theme::BORDER),
+        StrokeKind::Inside,
+    );
 }

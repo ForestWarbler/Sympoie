@@ -254,10 +254,8 @@ fn vendor_row(ui: &mut Ui, state: &mut BrowserState, group: &VendorGroup<'_>) ->
     response.widget_info(|| {
         egui::WidgetInfo::selected(egui::WidgetType::CollapsingHeader, true, open, group.name)
     });
-    if response.hovered() {
-        ui.painter().rect_filled(rect, 0.0, theme::BG_WIDGET_HOVER);
-    }
-    let center = pos2(rect.left() + 9.0, rect.center().y);
+    custom::row_highlight(ui.painter(), rect, false, response.hovered());
+    let center = pos2(rect.left() + 11.0, rect.center().y);
     let points = if open {
         vec![
             center + vec2(-3.5, -2.0),
@@ -277,12 +275,12 @@ fn vendor_row(ui: &mut Ui, state: &mut BrowserState, group: &VendorGroup<'_>) ->
         Stroke::NONE,
     ));
     let folder = Rect::from_center_size(
-        pos2(rect.left() + 23.0, rect.center().y + 1.0),
+        pos2(rect.left() + 25.0, rect.center().y + 1.0),
         vec2(10.0, 7.0),
     );
     ui.painter().rect_stroke(
         folder,
-        0.0,
+        1.0,
         Stroke::new(1.0, theme::TEXT_DIM),
         egui::StrokeKind::Inside,
     );
@@ -298,7 +296,7 @@ fn vendor_row(ui: &mut Ui, state: &mut BrowserState, group: &VendorGroup<'_>) ->
         theme::prop(9.5),
         theme::TEXT_DIM,
     );
-    let count_left = rect.right() - count.size().x - 6.0;
+    let count_left = rect.right() - count.size().x - 10.0;
     ui.painter().galley(
         pos2(count_left, rect.center().y - count.size().y / 2.0),
         count,
@@ -307,7 +305,7 @@ fn vendor_row(ui: &mut Ui, state: &mut BrowserState, group: &VendorGroup<'_>) ->
     widgets::fitted_text(
         ui.painter(),
         Rect::from_min_max(
-            pos2(rect.left() + 34.0, rect.top()),
+            pos2(rect.left() + 36.0, rect.top()),
             pos2(count_left - 8.0, rect.bottom()),
         ),
         group.name,
@@ -349,12 +347,7 @@ fn device_row(
             item.name(),
         )
     });
-    if selected {
-        ui.painter()
-            .rect_filled(rect, 0.0, ui.visuals().selection.bg_fill);
-    } else if response.hovered() {
-        ui.painter().rect_filled(rect, 0.0, theme::BG_WIDGET_HOVER);
-    }
+    custom::row_highlight(ui.painter(), rect, selected, response.hovered());
     let indent = if nested { 18.0 } else { 0.0 };
     let color = if selected {
         egui::Color32::WHITE
@@ -362,15 +355,15 @@ fn device_row(
         theme::TEXT_DIM
     };
     let glyph = Rect::from_center_size(
-        pos2(rect.left() + indent + 10.0, rect.center().y),
+        pos2(rect.left() + indent + 12.0, rect.center().y),
         vec2(7.0, 7.0),
     );
     if item.is_instrument() {
-        ui.painter().rect_filled(glyph, 0.0, color);
+        ui.painter().rect_filled(glyph, 1.0, color);
     } else {
         ui.painter().rect_stroke(
             glyph,
-            0.0,
+            1.0,
             Stroke::new(1.0, color),
             egui::StrokeKind::Inside,
         );
@@ -378,7 +371,7 @@ fn device_row(
     widgets::fitted_text(
         ui.painter(),
         Rect::from_min_max(
-            pos2(rect.left() + indent + 20.0, rect.top()),
+            pos2(rect.left() + indent + 22.0, rect.top()),
             rect.max - vec2(4.0, 0.0),
         ),
         item.name(),
@@ -460,8 +453,15 @@ pub fn show(ui: &mut Ui, state: &mut BrowserState, inputs: &Inputs<'_>, actions:
                     } else {
                         "Search name or vendor"
                     })
+                    .margin(egui::Margin {
+                        left: 22,
+                        right: 6,
+                        top: 2,
+                        bottom: 2,
+                    })
                     .desired_width(search.width()),
             );
+            custom::decorate_search(ui.painter(), &response);
             if response.changed() {
                 state.selected = None;
                 state.search_collapsed_vendors.clear();
@@ -506,7 +506,7 @@ pub fn show(ui: &mut Ui, state: &mut BrowserState, inputs: &Inputs<'_>, actions:
                     ui,
                     &labels,
                     current,
-                    |_| theme::ACCENT,
+                    |_| theme::SELECT,
                     |index| Id::new(("browser-category", bank[index])),
                 )
             },
@@ -559,7 +559,6 @@ pub fn show(ui: &mut Ui, state: &mut BrowserState, inputs: &Inputs<'_>, actions:
                 }
             }
             if shown.is_empty() {
-                ui.add_space(8.0);
                 let message = if inputs.scan_status.is_some() {
                     "Scanning plug-ins…"
                 } else if state.query.trim().is_empty() {
@@ -567,7 +566,7 @@ pub fn show(ui: &mut Ui, state: &mut BrowserState, inputs: &Inputs<'_>, actions:
                 } else {
                     "No matches"
                 };
-                ui.label(egui::RichText::new(message).color(theme::TEXT_DIM));
+                custom::message(ui, message);
             }
         });
 
@@ -665,11 +664,12 @@ fn drag_preview(ui: &Ui) {
     ));
     let text = painter.layout_no_wrap(device.name().to_owned(), theme::prop(11.0), theme::TEXT);
     let rect = Rect::from_min_size(pointer + vec2(14.0, 16.0), text.size() + vec2(16.0, 10.0));
+    painter.add(ui.visuals().popup_shadow.as_shape(rect, 6.0));
     painter.rect(
         rect,
-        3.0,
+        6.0,
         theme::BG_RAISED,
-        Stroke::new(1.0, theme::ACCENT),
+        Stroke::new(1.0, theme::SELECT),
         egui::StrokeKind::Inside,
     );
     painter.galley(rect.min + vec2(8.0, 5.0), text, theme::TEXT);

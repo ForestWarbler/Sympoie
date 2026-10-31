@@ -22,7 +22,9 @@ use crate::state::{
     self, ArrangementState, GridDensity, GridMode, LoopRegion, Selection, TimeRange,
 };
 use crate::ui::analog;
+use crate::ui::bars;
 use crate::ui::format;
+use crate::ui::rack;
 use crate::ui::theme;
 use crate::ui::waveform::WaveformCache;
 use crate::ui::widgets;
@@ -49,7 +51,12 @@ const TOP_HEIGHT: f32 = OVERVIEW_HEIGHT + NUMBERS_HEIGHT + LOOP_BAND;
 const MASTER_HEIGHT: f32 = 60.0;
 const EDGE_GRAB: f32 = 6.0;
 const CLIP_HEADER: f32 = 13.0;
+const CLIP_RADIUS: f32 = 3.0;
+/// The start marker while playing: a faint trace of where playback began.
+const START_MARKER_PLAYING: Color32 = Color32::from_rgba_premultiplied(80, 80, 80, 80);
 const TITLE_HEIGHT: f32 = 18.0;
+/// Dims regions under automation envelopes; the lanes keep their bar bands.
+const AUTOMATION_DIM: Color32 = Color32::from_black_alpha(150);
 
 pub struct Inputs<'a> {
     pub project: &'a Project,
@@ -326,11 +333,8 @@ pub fn show(
     let lanes_left = areas.split();
     let lanes_right = full.right();
     ui.painter().rect_filled(full, 0.0, theme::BG_DEEP);
-    ui.painter().rect_filled(
-        areas.rows.with_min_x(lanes_left),
-        0.0,
-        Color32::from_rgb(0x1c, 0x1c, 0x1c),
-    );
+    ui.painter()
+        .rect_filled(areas.rows.with_min_x(lanes_left), 0.0, theme::WORKSPACE);
     ui.painter()
         .rect_filled(areas.rows.with_max_x(lanes_left), 0.0, theme::BG_PANEL);
     state.lanes_width = (lanes_right - lanes_left).max(1.0);
@@ -477,6 +481,12 @@ pub fn show(
                 .zip(row_rects.last())
                 .map(|(first, last)| (first.1.top(), last.1.bottom()));
             if let Some((top, bottom)) = rows_extent {
+                paint_bar_bands(
+                    &painter,
+                    Rect::from_x_y_ranges(lanes_left..=lanes_right, top..=bottom),
+                    &timeline,
+                    project.time_signature(),
+                );
                 paint_grid(
                     &painter,
                     &timeline,
@@ -490,7 +500,7 @@ pub fn show(
                     painter.rect_filled(
                         Rect::from_x_y_ranges(x0..=x1, top..=bottom),
                         0.0,
-                        Color32::from_white_alpha(5),
+                        theme::LOOP.gamma_multiply(0.03),
                     );
                 }
             }
@@ -511,7 +521,6 @@ pub fn show(
                         actions,
                     );
                     if state.automation {
-                        painter.rect_filled(lane, 0.0, Color32::from_black_alpha(150));
                         automation::lane(
                             ui,
                             lane,
@@ -559,12 +568,9 @@ pub fn show(
                 let x1 = timeline.x((to + moving.range.len()) as f64);
                 for (row, rect) in &row_rects {
                     if moving.range.tracks.contains(&row.index) {
-                        painter.rect(
+                        paint_ghost(
+                            &painter,
                             Rect::from_x_y_ranges(x0..=x1, rect.top() + 1.0..=rect.bottom() - 2.0),
-                            0.0,
-                            Color32::from_white_alpha(18),
-                            Stroke::new(1.0, Color32::WHITE),
-                            StrokeKind::Inside,
                         );
                     }
                 }
@@ -605,13 +611,7 @@ pub fn show(
                         timeline.x(ghost.start as f64)..=timeline.x(ghost.end as f64),
                         rect.top() + 1.0..=rect.bottom() - 2.0,
                     );
-                    painter.rect(
-                        ghost_rect,
-                        0.0,
-                        Color32::from_white_alpha(18),
-                        Stroke::new(1.0, Color32::WHITE),
-                        StrokeKind::Inside,
-                    );
+                    paint_ghost(&painter, ghost_rect);
                     let (anchor, edge) = match drag.mode {
                         ClipMode::TrimEnd => (Align2::RIGHT_TOP, ghost.end),
                         _ => (Align2::LEFT_TOP, ghost.start),
@@ -684,7 +684,7 @@ pub fn show(
             actions.push(Action::SelectClip(None));
             actions.push(Action::Seek(timeline.snapped(pointer.x, !ignore_grid(ui))));
         }
-        response.context_menu(|ui| {
+        widgets::context_menu(&response, |ui| {
             for (kind, label) in [
                 (TrackKind::Audio, "Insert Audio Track"),
                 (TrackKind::Midi, "Insert MIDI Track"),
@@ -735,12 +735,19 @@ pub fn show(
     device_drop_target(ui, areas.master, project, 0, actions);
 
     let overlay = ui.painter().with_clip_rect(areas.lanes());
+    let playing = inputs.status.state == PlaybackState::Playing;
     let start_x = timeline.x(state.playback_start as f64).round() + 0.5;
     if (lanes_left..=lanes_right).contains(&start_x) {
+        // While playing, the start position stays behind as a faint marker.
+        let color = if playing {
+            START_MARKER_PLAYING
+        } else {
+            theme::PLAYHEAD
+        };
         overlay.vline(
             start_x,
             areas.numbers.top()..=areas.master.bottom(),
-            Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.65)),
+            Stroke::new(1.0, color),
         );
         let start_head = Rect::from_min_max(
             pos2(start_x - 5.0, areas.numbers.top()),
@@ -748,29 +755,16 @@ pub fn show(
         );
         ui.interact(start_head, Id::new("playback-start"), Sense::hover())
             .on_hover_text("Next playback starts here");
-        overlay.add(Shape::convex_polygon(
-            vec![
-                start_head.left_top(),
-                start_head.right_top(),
-                start_head.center_bottom(),
-            ],
-            theme::ACCENT,
-            Stroke::NONE,
-        ));
+        widgets::playhead_head(&overlay, start_x, areas.numbers.top(), color);
     }
-    if inputs.status.state == PlaybackState::Playing {
+    if playing {
         let x = timeline.x(playhead).round() + 0.5;
         overlay.vline(
             x,
             areas.numbers.top()..=areas.master.bottom(),
             Stroke::new(1.0, theme::PLAYHEAD),
         );
-        let head = vec![
-            pos2(x - 5.0, areas.numbers.top()),
-            pos2(x + 5.0, areas.numbers.top()),
-            pos2(x, areas.numbers.top() + 7.0),
-        ];
-        overlay.add(Shape::convex_polygon(head, theme::PLAYHEAD, Stroke::NONE));
+        widgets::playhead_head(&overlay, x, areas.numbers.top(), theme::PLAYHEAD);
     }
 
     ui.painter().vline(
@@ -791,6 +785,16 @@ pub fn show(
     ui.data_mut(|d| d.insert_temp(interaction_id(), interaction));
     ui.advance_cursor_after_rect(full);
     drop_target
+}
+
+fn paint_ghost(painter: &egui::Painter, rect: Rect) {
+    painter.rect(
+        rect,
+        CLIP_RADIUS,
+        Color32::from_white_alpha(16),
+        Stroke::new(1.0, Color32::from_white_alpha(220)),
+        StrokeKind::Inside,
+    );
 }
 
 fn device_drop_target(
@@ -934,13 +938,18 @@ fn ruler(
     );
 
     let painter = ui.painter_at(numbers);
-    painter.rect_filled(numbers, 0.0, theme::BG_PANEL);
+    painter.rect_filled(numbers, 0.0, theme::RULER);
+    painter.hline(
+        numbers.x_range(),
+        numbers.top() + 0.5,
+        Stroke::new(1.0, Color32::from_white_alpha(8)),
+    );
     if let Some(range) = &inputs.selection.range {
         let span = Rect::from_x_y_ranges(
             timeline.x(range.start as f64)..=timeline.x(range.end as f64),
             numbers.y_range(),
         );
-        painter.rect_filled(span, 0.0, theme::SELECTION.gamma_multiply(0.22));
+        painter.rect_filled(span, 0.0, theme::SELECTION.gamma_multiply(0.2));
     }
     let (from, to) = timeline.visible();
     let step = format::ruler_step(meter, timeline.pixels_per_tick, 48.0);
@@ -986,7 +995,7 @@ fn ruler(
     );
 
     let painter = ui.painter_at(band);
-    painter.rect_filled(band, 0.0, theme::LANE);
+    painter.rect_filled(band, 0.0, theme::tint(theme::RULER, theme::BG_DEEP, 0.55));
     painter.hline(
         band.x_range(),
         band.bottom() - 0.5,
@@ -994,20 +1003,11 @@ fn ruler(
     );
     let x0 = timeline.x(loop_shown.start as f64);
     let x1 = timeline.x(loop_shown.end as f64);
-    let brace = Rect::from_x_y_ranges(x0..=x1, band.top() + 2.0..=band.bottom() - 3.0);
-    let brace_color = if loop_shown.enabled {
-        theme::LOOP
-    } else {
-        theme::LOOP_OFF
-    };
-    painter.rect_filled(brace, 0.0, brace_color);
-    for edge in [brace.left(), brace.right() - 2.0] {
-        painter.rect_filled(
-            Rect::from_min_max(pos2(edge, brace.top()), pos2(edge + 2.0, band.bottom())),
-            0.0,
-            brace_color,
-        );
-    }
+    paint_cycle(
+        &painter,
+        Rect::from_x_y_ranges(x0..=x1, band.top() + 2.0..=band.bottom() - 3.0),
+        loop_shown.enabled,
+    );
 
     let snap_on = !ignore_grid(ui);
     let band_response = ui
@@ -1090,6 +1090,72 @@ fn ruler(
         let tick = timeline.snapped(pointer.x, snap_on);
         actions.push(Action::Seek(tick));
     }
+}
+
+fn paint_cycle(painter: &egui::Painter, strip: Rect, enabled: bool) {
+    // A short cycle stays visible at far zoom-out, where its handles still are.
+    let strip = if strip.width() < 4.0 {
+        Rect::from_center_size(strip.center(), vec2(4.0, strip.height()))
+    } else {
+        strip
+    };
+    let base = if enabled {
+        theme::LOOP
+    } else {
+        theme::LOOP_OFF
+    };
+    painter.rect_filled(strip, CLIP_RADIUS, base);
+    let grip = 5.0_f32.min(strip.width() / 4.0);
+    let shade = base.lerp_to_gamma(Color32::BLACK, 0.22);
+    let round = CLIP_RADIUS as u8;
+    painter.rect_filled(
+        strip.with_max_x(strip.left() + grip),
+        egui::CornerRadius {
+            nw: round,
+            sw: round,
+            ne: 0,
+            se: 0,
+        },
+        shade,
+    );
+    painter.rect_filled(
+        strip.with_min_x(strip.right() - grip),
+        egui::CornerRadius {
+            nw: 0,
+            sw: 0,
+            ne: round,
+            se: round,
+        },
+        shade,
+    );
+    painter.hline(
+        (strip.left() + grip)..=(strip.right() - grip),
+        strip.top() + 1.5,
+        Stroke::new(
+            1.0,
+            Color32::from_white_alpha(if enabled { 80 } else { 26 }),
+        ),
+    );
+    painter.rect_stroke(
+        strip,
+        CLIP_RADIUS,
+        Stroke::new(1.0, base.lerp_to_gamma(Color32::BLACK, 0.55)),
+        StrokeKind::Inside,
+    );
+}
+
+fn paint_bar_bands(painter: &egui::Painter, rect: Rect, timeline: &Timeline, meter: TimeSignature) {
+    let bounds = painter.clip_rect();
+    let from = timeline.tick(bounds.left().max(timeline.left));
+    let to = timeline.tick(bounds.right().min(timeline.right));
+    bars::paint_bands(
+        painter,
+        rect,
+        meter.ticks_per_bar(),
+        timeline.pixels_per_tick,
+        from..=to,
+        |tick| timeline.x(tick as f64),
+    );
 }
 
 fn paint_grid(
@@ -1197,7 +1263,7 @@ fn lane_background(
             },
             |(_, tick)| tick,
         );
-    response.context_menu(|ui| {
+    widgets::context_menu(&response, |ui| {
         lane_menu(ui, row.index, menu_tick, grid_mode, inputs, actions);
     });
 }
@@ -1261,7 +1327,7 @@ fn lane_menu(
             }
         }
         _ => {
-            ui.label(RichText::new("Groups mix their member tracks").color(theme::TEXT_DIM));
+            widgets::menu_caption(ui, "Groups mix their member tracks");
         }
     }
     if range.is_some() {
@@ -1300,8 +1366,7 @@ pub fn grid_menu(ui: &mut Ui, current: GridMode, project: &Project, actions: &mu
     };
     for density in GridDensity::ALL {
         let mode = GridMode::Adaptive(density);
-        if ui
-            .radio(current == mode, format!("{} Grid", density.label()))
+        if widgets::radio_choice(ui, current == mode, &format!("{} Grid", density.label()))
             .clicked()
         {
             actions.push(Action::SetGridMode(mode));
@@ -1317,7 +1382,7 @@ pub fn grid_menu(ui: &mut Ui, current: GridMode, project: &Project, actions: &mu
     };
     ui.menu_button(title, |ui| {
         for grid in &format::GRIDS[1..] {
-            if ui.radio(fixed && saved == *grid, label(*grid)).clicked() {
+            if widgets::radio_choice(ui, fixed && saved == *grid, &label(*grid)).clicked() {
                 actions.push(Action::SetGridMode(GridMode::Fixed));
                 if saved != *grid {
                     actions.push(Action::SetSnap(*grid));
@@ -1327,8 +1392,7 @@ pub fn grid_menu(ui: &mut Ui, current: GridMode, project: &Project, actions: &mu
         }
     });
     let off = current == GridMode::Fixed && saved == SnapGrid::Off;
-    if ui
-        .radio(off, "Off")
+    if widgets::radio_choice(ui, off, "Off")
         .on_hover_text("Edits ignore the grid")
         .clicked()
     {
@@ -1439,7 +1503,7 @@ fn clips(
     editable: bool,
     actions: &mut Vec<Action>,
 ) {
-    let color = theme::track_color(project, row.index);
+    let color = region_color(project, row.index);
     // Command can be pressed or released mid-drag; whatever is held at the drop decides.
     if let Some(drag) = &mut interaction.clip_drag {
         drag.copy = drag.mode == ClipMode::Move && ui.input(|i| i.modifiers.command);
@@ -1453,7 +1517,7 @@ fn clips(
     let in_selection =
         |x: f32| selection.is_some_and(|range| range.contains(row.index, timeline.tick(x)));
     if matches!(project.tracks()[row.index], Track::Group(_)) {
-        group_summary(painter, body, row.index, timeline, project);
+        group_summary(painter, body, row.index, timeline, project, !editable);
         return;
     }
     let count = match &project.tracks()[row.index] {
@@ -1462,6 +1526,7 @@ fn clips(
         _ => 0,
     };
     let (view_from, view_to) = timeline.visible();
+    let label_ink = widgets::track_ink(color);
     for index in 0..count {
         let clip = ClipRef {
             track: row.index,
@@ -1577,7 +1642,7 @@ fn clips(
         }
         if editable {
             let mut rename = false;
-            response.context_menu(|ui| {
+            widgets::context_menu(&response, |ui| {
                 let reverse_selection = selection
                     .is_some_and(|range| start < range.end as f64 && end > range.start as f64)
                     && inputs.selection.has_audio(project);
@@ -1596,35 +1661,35 @@ fn clips(
             .clip_drag
             .is_some_and(|drag| drag.clip == clip && !drag.copy);
         let fade = if moving_original { 0.45 } else { 1.0 };
-        let (fill, ink, label_fill) = if selected {
+        let (body, strip, ink) = if selected {
             (
-                theme::tint(theme::LANE, color, 0.30),
-                theme::tint(color, Color32::WHITE, 0.25),
-                theme::tint(color, Color32::WHITE, 0.15),
+                theme::tint(theme::LANE, color, 0.42),
+                theme::tint(color, Color32::WHITE, 0.2),
+                theme::tint(color, Color32::WHITE, 0.55),
             )
         } else {
             (
-                theme::tint(theme::LANE, color, 0.14),
-                color.gamma_multiply(0.92),
+                theme::tint(theme::LANE, color, 0.30),
                 theme::tint(color, Color32::BLACK, 0.12),
+                theme::tint(color, Color32::WHITE, 0.3),
             )
         };
-        let painted_fill = fill.gamma_multiply(fade);
-        painter.rect_filled(rect, 2.0, painted_fill);
+        painter.rect_filled(rect, CLIP_RADIUS, body.gamma_multiply(fade));
+        let round = CLIP_RADIUS as u8;
         painter.rect_filled(
             header,
             egui::CornerRadius {
-                nw: 2,
-                ne: 2,
+                nw: round,
+                ne: round,
                 sw: 0,
                 se: 0,
             },
-            label_fill.gamma_multiply(fade),
+            strip.gamma_multiply(fade),
         );
         painter.hline(
             header.x_range(),
             header.bottom() - 0.5,
-            Stroke::new(1.0, Color32::from_black_alpha(90)),
+            Stroke::new(1.0, Color32::from_black_alpha(50)),
         );
         let content = Rect::from_min_max(pos2(rect.left(), header.bottom()), rect.max)
             .shrink2(vec2(0.0, 2.0));
@@ -1645,7 +1710,7 @@ fn clips(
                     text_rect,
                     label,
                     theme::prop(10.0),
-                    theme::TEXT_ON_COLOR,
+                    label_ink,
                     Align2::LEFT_CENTER,
                 );
             }
@@ -1685,48 +1750,44 @@ fn clips(
             }
             _ => {}
         }
-        let lane_fill = if inputs.selection.tracks.contains(&row.index) {
-            theme::LANE_SELECTED
-        } else {
-            theme::LANE
-        };
-        let grid_color = if lane_fill.blend(painted_fill).intensity() >= 0.5 {
-            Color32::from_black_alpha
-        } else {
-            Color32::from_white_alpha
-        };
-        let grid_rect = rect.with_min_y(header.bottom()).intersect(lane);
+        let grid_rect = rect
+            .with_min_y(header.bottom())
+            .shrink2(vec2(1.0, 0.0))
+            .intersect(lane);
         if grid_rect.is_positive() {
             paint_grid(
                 &painter.with_clip_rect(grid_rect),
                 timeline,
                 project.time_signature(),
                 grid_rect.top()..=grid_rect.bottom(),
-                [96, 64, 40].map(grid_color),
+                [theme::grid_bar(), theme::grid_beat(), theme::grid_fine()],
             );
         }
-        if selected {
-            painter.rect_stroke(
-                rect,
-                2.0,
-                Stroke::new(1.0, theme::tint(color, Color32::WHITE, 0.6)),
-                StrokeKind::Inside,
-            );
+        let outline = if selected {
+            theme::tint(color, Color32::WHITE, 0.65)
         } else if response.hovered() {
-            painter.rect_stroke(
-                rect,
-                2.0,
-                Stroke::new(1.0, Color32::from_white_alpha(110)),
-                StrokeKind::Inside,
-            );
+            Color32::from_white_alpha(90)
         } else {
-            painter.rect_stroke(
-                rect,
-                2.0,
-                Stroke::new(1.0, Color32::from_black_alpha(120)),
-                StrokeKind::Inside,
-            );
+            Color32::from_black_alpha(140)
+        };
+        painter.rect_stroke(
+            rect,
+            CLIP_RADIUS,
+            Stroke::new(1.0, outline),
+            StrokeKind::Inside,
+        );
+        if !editable {
+            painter.rect_filled(rect, CLIP_RADIUS, AUTOMATION_DIM);
         }
+    }
+}
+
+fn region_color(project: &Project, index: usize) -> Color32 {
+    let color = theme::track_color(project, index);
+    if project.tracks()[index].mixer().muted() {
+        theme::tint(color, Color32::from_gray(0x6e), 0.65)
+    } else {
+        color
     }
 }
 
@@ -1736,6 +1797,7 @@ fn group_summary(
     group: usize,
     timeline: &Timeline,
     project: &Project,
+    dimmed: bool,
 ) {
     let members: Vec<usize> = rows::subtree(project, group)
         .into_iter()
@@ -1746,36 +1808,34 @@ fn group_summary(
     }
     let band = (body.height() / members.len() as f32).clamp(2.0, 10.0);
     let top = body.center().y - band * members.len() as f32 / 2.0;
+    let (from, to) = timeline.visible();
     for (slot, index) in members.iter().enumerate() {
         let y = top + slot as f32 * band;
-        let spans: Vec<(f64, f64)> = match &project.tracks()[*index] {
-            Track::Audio(track) => track
-                .clips()
-                .iter()
-                .map(|clip| (clip.start_tick as f64, audio_end_tick(project, clip)))
-                .collect(),
-            Track::Midi(track) => track
-                .clips()
-                .iter()
-                .map(|clip| {
-                    (
+        let color = region_color(project, *index).gamma_multiply(if dimmed { 0.3 } else { 0.7 });
+        let bar = |start: f64, end: f64| {
+            if end >= from && start <= to {
+                let rect = Rect::from_x_y_ranges(
+                    timeline.x(start)..=timeline.x(end),
+                    y + 1.0..=y + band - 1.0,
+                );
+                painter.rect_filled(rect, 0.0, color);
+            }
+        };
+        match &project.tracks()[*index] {
+            Track::Audio(track) => {
+                for clip in track.clips() {
+                    bar(clip.start_tick as f64, audio_end_tick(project, clip));
+                }
+            }
+            Track::Midi(track) => {
+                for clip in track.clips() {
+                    bar(
                         clip.start_tick as f64,
                         (clip.start_tick + clip.length_ticks) as f64,
-                    )
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
-        for (start, end) in spans {
-            let rect = Rect::from_x_y_ranges(
-                timeline.x(start)..=timeline.x(end),
-                y + 1.0..=y + band - 1.0,
-            );
-            painter.rect_filled(
-                rect,
-                0.0,
-                theme::track_color(project, *index).gamma_multiply(0.6),
-            );
+                    );
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -1810,6 +1870,7 @@ fn rename_clip_inline(
                         .margin(vec2(3.0, 0.0))
                         .desired_width(header.width() - 6.0),
                 );
+                widgets::ring_focus(ui, &edit);
                 if !edit.has_focus() && !edit.lost_focus() {
                     edit.request_focus();
                 }
@@ -1898,7 +1959,7 @@ fn clip_menu(
                 actions.push(Action::ResetClipPitch(clip));
             }
             ui.separator();
-            ui.label("Algorithm");
+            widgets::menu_caption(ui, "Algorithm");
             let mut algorithm = audio.pitch_algorithm;
             let mut preserve_formants = audio.preserve_formants;
             for choice in [
@@ -1906,11 +1967,13 @@ fn clip_menu(
                 PitchAlgorithm::RubberBandR3,
                 PitchAlgorithm::Builtin,
             ] {
-                ui.selectable_value(&mut algorithm, choice, choice.label());
+                widgets::choice_value(ui, &mut algorithm, choice, choice.label());
             }
-            ui.add_enabled(
+            widgets::checkbox(
+                ui,
                 algorithm.supports_formants(),
-                egui::Checkbox::new(&mut preserve_formants, "Preserve Formants"),
+                &mut preserve_formants,
+                "Preserve Formants",
             );
             if algorithm != audio.pitch_algorithm || preserve_formants != audio.preserve_formants {
                 actions.push(Action::SetClipPitchOptions {
@@ -2253,11 +2316,11 @@ fn update_track_drag(
                     let header = rect
                         .with_min_x(viewport.left())
                         .with_max_x(viewport.right());
-                    painter.rect_filled(header, 0.0, theme::ACCENT.gamma_multiply(0.18));
+                    painter.rect_filled(header, 0.0, theme::SELECT.gamma_multiply(0.18));
                     painter.rect_stroke(
                         header.shrink(1.0),
                         0.0,
-                        Stroke::new(2.0, theme::ACCENT),
+                        Stroke::new(2.0, theme::SELECT),
                         StrokeKind::Inside,
                     );
                 }
@@ -2279,7 +2342,7 @@ fn update_track_drag(
                         .find(|(row, _)| row.index == index)
                         .map_or(row.depth, |(row, _)| row.depth);
                     let x = viewport.left() + depth as f32 * 10.0;
-                    painter.hline(x..=viewport.right(), y, Stroke::new(3.0, theme::ACCENT));
+                    painter.hline(x..=viewport.right(), y, Stroke::new(3.0, theme::SELECT));
                 }
             }
         }
@@ -2325,36 +2388,8 @@ fn track_header(
     let selected = inputs.selection.tracks.contains(&row.index);
     let color = theme::track_color(project, row.index);
     let painter = ui.painter_at(rect);
-    let (top, bottom) = if selected {
-        (
-            theme::tint(theme::HEADER_SELECTED, color, 0.08),
-            theme::tint(theme::HEADER, color, 0.05),
-        )
-    } else {
-        (
-            theme::HEADER,
-            theme::tint(theme::HEADER, theme::BG_PANEL, 0.7),
-        )
-    };
-    analog::gradient_rect(&painter, rect, top, bottom);
-    painter.hline(
-        rect.x_range(),
-        rect.bottom() - 0.5,
-        Stroke::new(1.0, theme::BORDER),
-    );
     let indent = row.depth as f32 * 10.0;
-    if row.depth > 0 {
-        painter.rect_filled(
-            Rect::from_min_size(rect.min, vec2(indent, rect.height())),
-            0.0,
-            theme::BG_PANEL,
-        );
-        painter.vline(
-            rect.left() + indent - 4.5,
-            rect.y_range(),
-            Stroke::new(1.0, theme::HAIRLINE),
-        );
-    }
+    paint_header(&painter, rect, indent, color, selected);
 
     let background = ui.interact(rect, Id::new(("header", row.index)), Sense::click());
     if background.double_clicked() {
@@ -2362,26 +2397,14 @@ fn track_header(
     } else if background.clicked() {
         select_header(ui, row.index, inputs.selection, actions);
     }
-    background
-        .context_menu(|ui| track_menu(ui, project, row.index, inputs.selection, state, actions));
+    widgets::context_menu(&background, |ui| {
+        track_menu(ui, project, row.index, inputs.selection, state, actions)
+    });
 
     let title = Rect::from_min_max(
         rect.min + vec2(indent, 0.0),
         pos2(rect.right(), rect.top() + TITLE_HEIGHT),
     );
-    let title_fill = if selected {
-        theme::tint(color, Color32::WHITE, 0.2)
-    } else {
-        color
-    };
-    widgets::color_bar(&painter, title, title_fill, "");
-    if selected {
-        painter.vline(
-            title.left() + 4.5,
-            (title.top() + 1.0)..=(rect.bottom() - 1.0),
-            Stroke::new(1.0, title_fill.gamma_multiply(0.6)),
-        );
-    }
     let foldable = row.has_children || matches!(track, Track::Group(_));
     let name_left = if foldable {
         let folded = state.folded.contains(&row.index);
@@ -2431,6 +2454,7 @@ fn track_header(
                     let edit = ui.add(
                         egui::TextEdit::singleline(text).desired_width(name_rect.width() - 8.0),
                     );
+                    widgets::ring_focus(ui, &edit);
                     if !edit.has_focus() && !edit.lost_focus() {
                         edit.request_focus();
                     }
@@ -2479,7 +2503,7 @@ fn track_header(
         } else if name.clicked() {
             select_header(ui, row.index, inputs.selection, actions);
         }
-        name.context_menu(|ui| {
+        widgets::context_menu(&name, |ui| {
             track_menu(ui, project, row.index, inputs.selection, state, actions)
         });
     }
@@ -2514,6 +2538,7 @@ fn track_header(
         );
         widgets::inside(ui, controls, Layout::left_to_right(Align::Min), |ui| {
             ui.spacing_mut().item_spacing.x = 3.0;
+            widgets::field_visuals(ui.style_mut());
             mixer_controls(ui, project, row.index, actions);
         });
     }
@@ -2521,9 +2546,69 @@ fn track_header(
         automation::selector(ui, rect, indent, row.index, state, project, actions);
     }
     if let Some(meter) = meter {
-        header_meter(ui, rect, indent, row.index, track.name(), meter);
+        header_meter(ui, rect, indent, row.index, track.name(), selected, meter);
     }
     track_resize_handle(ui, rect, row.index, state, interaction);
+}
+
+fn paint_header(painter: &egui::Painter, rect: Rect, indent: f32, color: Color32, selected: bool) {
+    let fill = if selected {
+        theme::tint(theme::HEADER_SELECTED, color, 0.04)
+    } else {
+        theme::HEADER
+    };
+    analog::gradient_rect(
+        painter,
+        rect,
+        fill.lerp_to_gamma(Color32::WHITE, 0.025),
+        fill,
+    );
+    painter.hline(
+        rect.x_range(),
+        rect.top() + 0.5,
+        Stroke::new(1.0, Color32::from_white_alpha(9)),
+    );
+    painter.hline(
+        rect.x_range(),
+        rect.bottom() - 0.5,
+        Stroke::new(1.0, theme::BORDER),
+    );
+    if indent > 0.0 {
+        painter.rect_filled(
+            Rect::from_min_size(rect.min, vec2(indent, rect.height())),
+            0.0,
+            theme::BG_PANEL,
+        );
+        painter.vline(
+            rect.left() + indent - 4.5,
+            rect.y_range(),
+            Stroke::new(1.0, theme::HAIRLINE),
+        );
+    }
+    painter.rect_filled(
+        Rect::from_min_max(
+            pos2(rect.left() + indent, rect.top()),
+            pos2(rect.left() + indent + 3.0, rect.bottom() - 1.0),
+        ),
+        0.0,
+        color,
+    );
+}
+
+fn header_key(
+    painter: &egui::Painter,
+    rect: Rect,
+    light: Option<Color32>,
+    response: &Response,
+) -> Rect {
+    analog::key(
+        painter,
+        rect.shrink2(vec2(1.0, 1.5)),
+        3.0,
+        light,
+        response.hovered(),
+        response.is_pointer_button_down_on(),
+    )
 }
 
 fn track_resize_handle(
@@ -2656,6 +2741,7 @@ fn header_meter(
     indent: f32,
     index: usize,
     name: &str,
+    selected: bool,
     meter: &mut widgets::MeterState,
 ) {
     let full = rect.height() >= 56.0;
@@ -2670,12 +2756,18 @@ fn header_meter(
         pos2(rect.right() - 6.0, meter_top + 9.0),
     );
     if full {
-        ui.painter_at(rect).text(
-            pos2(rect.left() + indent + 6.0, meter_rect.center().y),
+        let painter = ui.painter_at(rect);
+        let ink = if selected {
+            theme::TEXT_DIM
+        } else {
+            theme::TEXT_FAINT
+        };
+        rack::print(
+            &painter,
+            pos2(rect.left() + indent + 7.0, meter_rect.center().y),
             Align2::LEFT_CENTER,
             "Peak",
-            theme::prop(9.0),
-            theme::TEXT_FAINT,
+            ink,
         );
     }
     widgets::meter_at(
@@ -2825,24 +2917,36 @@ fn paint_recording(painter: &egui::Painter, lane: Rect, timeline: &Timeline, sta
     let left = timeline.x(start as f64);
     let right = timeline.x(end.max(start as f64)).max(left + 2.0);
     let rect = Rect::from_min_max(
-        pos2(left, lane.top() + 2.0),
+        pos2(left, lane.top() + 1.0),
         pos2(right, lane.bottom() - 2.0),
     );
+    let header = rect.with_max_y((rect.top() + CLIP_HEADER).min(rect.bottom()));
     let painter = painter.with_clip_rect(painter.clip_rect().intersect(lane));
-    painter.rect_filled(rect, 2.0, theme::ERROR.gamma_multiply(0.26));
+    painter.rect_filled(rect, CLIP_RADIUS, theme::RECORD.gamma_multiply(0.22));
+    let round = CLIP_RADIUS as u8;
+    painter.rect_filled(
+        header,
+        egui::CornerRadius {
+            nw: round,
+            ne: round,
+            sw: 0,
+            se: 0,
+        },
+        theme::RECORD,
+    );
     painter.rect_stroke(
         rect,
-        2.0,
-        Stroke::new(1.0, theme::ERROR),
+        CLIP_RADIUS,
+        Stroke::new(1.0, theme::tint(theme::RECORD, Color32::WHITE, 0.35)),
         StrokeKind::Inside,
     );
     widgets::fitted_text(
         &painter,
-        rect.intersect(lane).shrink2(vec2(5.0, 0.0)),
+        header.intersect(lane).shrink2(vec2(4.0, 0.0)),
         "Recording…",
-        theme::prop(10.5),
-        theme::TEXT,
-        Align2::LEFT_TOP,
+        theme::prop(10.0),
+        widgets::ink_on(theme::RECORD),
+        Align2::LEFT_CENTER,
     );
 }
 
@@ -2864,26 +2968,20 @@ fn arm_button(
     response
         .widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, armed, &label));
     let painter = ui.painter().with_clip_rect(rect.expand2(vec2(3.0, 1.0)));
-    let cap = analog::push_button(
-        &painter,
-        rect.shrink2(vec2(1.0, 1.5)),
-        2.5,
-        armed.then_some(theme::ERROR),
-        response.hovered(),
-        response.is_pointer_button_down_on(),
-    );
+    let cap = header_key(&painter, rect, armed.then_some(theme::RECORD), &response);
     widgets::paint_icon(
         &painter,
         cap.shrink2(vec2(3.0, 1.0)),
         widgets::Icon::Record,
-        if armed {
-            theme::TEXT_ON_COLOR
-        } else {
-            theme::ERROR
-        },
+        if armed { Color32::WHITE } else { theme::RECORD },
     );
     if armed && inputs.recording {
-        painter.rect_stroke(cap, 2.0, Stroke::new(1.0, theme::TEXT), StrokeKind::Inside);
+        painter.rect_stroke(
+            cap,
+            3.0,
+            Stroke::new(1.0, Color32::WHITE),
+            StrokeKind::Inside,
+        );
     }
     if response.clicked() {
         actions.push(Action::ToggleTrackArm(index));
@@ -2902,15 +3000,16 @@ fn mute_button(ui: &mut Ui, rect: Rect, index: usize, track: &Track, actions: &m
     let muted = track.mixer().muted();
     let response = ui.interact(rect, Id::new(("track-mute", index)), Sense::click());
     let painter = ui.painter().with_clip_rect(rect.expand2(vec2(3.0, 1.0)));
-    let cap = analog::push_button(
-        &painter,
-        rect.shrink2(vec2(1.0, 1.5)),
-        2.5,
-        muted.then_some(theme::WARN),
-        response.hovered(),
-        response.is_pointer_button_down_on(),
+    let light = muted.then_some(theme::MUTE);
+    let cap = header_key(&painter, rect, light, &response);
+    let ink = widgets::key_ink(light, response.hovered());
+    painter.text(
+        cap.center(),
+        Align2::CENTER_CENTER,
+        "M",
+        theme::prop(10.0),
+        ink,
     );
-    analog::legend(&painter, cap, "M", theme::prop(9.5), muted);
     if response.clicked() {
         actions.push(Action::SetMixer {
             track: index,
@@ -2924,15 +3023,16 @@ fn solo_button(ui: &mut Ui, rect: Rect, index: usize, track: &Track, actions: &m
     let soloed = track.mixer().soloed();
     let response = ui.interact(rect, Id::new(("track-solo", index)), Sense::click());
     let painter = ui.painter().with_clip_rect(rect.expand2(vec2(3.0, 1.0)));
-    let cap = analog::push_button(
-        &painter,
-        rect.shrink2(vec2(1.0, 1.5)),
-        2.5,
-        soloed.then_some(theme::ACCENT),
-        response.hovered(),
-        response.is_pointer_button_down_on(),
+    let light = soloed.then_some(theme::SOLO);
+    let cap = header_key(&painter, rect, light, &response);
+    let ink = widgets::key_ink(light, response.hovered());
+    painter.text(
+        cap.center(),
+        Align2::CENTER_CENTER,
+        "S",
+        theme::prop(10.0),
+        ink,
     );
-    analog::legend(&painter, cap, "S", theme::prop(9.5), soloed);
     if response.clicked() {
         actions.push(Action::SetSolo {
             track: index,
@@ -3111,17 +3211,14 @@ fn master_row(
         actions.push(Action::SelectTracks(BTreeSet::from([0])));
     }
     let painter = ui.painter_at(rect);
-    analog::gradient_rect(
-        &painter,
-        header,
-        if selected {
-            theme::HEADER_SELECTED
-        } else {
-            theme::HEADER
-        },
-        theme::tint(theme::HEADER, theme::BG_PANEL, 0.7),
-    );
+    paint_header(&painter, header, 0.0, theme::MASTER_COLOR, selected);
     painter.rect_filled(lane, 0.0, theme::LANE);
+    paint_bar_bands(
+        &painter.with_clip_rect(painter.clip_rect().intersect(lane)),
+        lane,
+        timeline,
+        project.time_signature(),
+    );
     painter.hline(
         rect.x_range(),
         rect.top() + 0.5,
@@ -3131,15 +3228,20 @@ fn master_row(
         header.min + vec2(0.0, 1.0),
         pos2(header.right(), header.top() + TITLE_HEIGHT + 1.0),
     );
-    widgets::color_bar(
+    widgets::fitted_text(
         &painter,
-        title,
-        if selected {
-            theme::tint(theme::MASTER_COLOR, Color32::WHITE, 0.3)
-        } else {
-            theme::MASTER_COLOR
-        },
+        Rect::from_min_max(
+            pos2(title.left() + 9.0, title.top()),
+            pos2(title.right() - 44.0, title.bottom()),
+        ),
         &rows::track_label(project, 0),
+        theme::prop(11.0),
+        if selected {
+            Color32::WHITE
+        } else {
+            theme::TEXT
+        },
+        Align2::LEFT_CENTER,
     );
     mute_button(
         ui,
@@ -3167,12 +3269,13 @@ fn master_row(
     );
     widgets::inside(ui, controls, Layout::left_to_right(Align::Min), |ui| {
         ui.spacing_mut().item_spacing.x = 3.0;
+        widgets::field_visuals(ui.style_mut());
         mixer_controls(ui, project, 0, actions);
     });
     if state.automation {
         automation::selector(ui, header, 0.0, 0, state, project, actions);
     }
-    header_meter(ui, header, 0.0, 0, "Master", meter);
+    header_meter(ui, header, 0.0, 0, "Master", selected, meter);
     let end = project.duration_frames().unwrap_or(0) as f64 / f64::from(sympoie::SAMPLE_RATE);
     if end > 0.0 && !state.automation {
         painter.text(

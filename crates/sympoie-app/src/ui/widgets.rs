@@ -1,6 +1,6 @@
 use eframe::egui::{
-    self, Align2, Color32, CursorIcon, Id, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind,
-    Ui, Vec2, pos2, vec2,
+    self, Align2, Color32, CornerRadius, CursorIcon, Id, InnerResponse, Painter, Pos2, Rect,
+    Response, Sense, Shape, Stroke, StrokeKind, Style, Ui, Vec2, pos2, vec2,
 };
 
 use crate::ui::{analog, format, theme};
@@ -21,9 +21,9 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color3
     match icon {
         Icon::Play => {
             let points = vec![
-                pos2(c.x - s * 0.5, c.y - s * 0.7),
-                pos2(c.x + s * 0.6, c.y),
-                pos2(c.x - s * 0.5, c.y + s * 0.7),
+                pos2(c.x - s * 0.55, c.y - s * 0.8),
+                pos2(c.x + s * 0.75, c.y),
+                pos2(c.x - s * 0.55, c.y + s * 0.8),
             ];
             painter.add(Shape::convex_polygon(points, color, Stroke::NONE));
         }
@@ -31,29 +31,62 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color3
             painter.rect_filled(Rect::from_center_size(c, Vec2::splat(s * 1.2)), 0.0, color);
         }
         Icon::Record => {
-            painter.circle_filled(c, s * 0.65, color);
+            painter.circle_filled(c, s * 0.7, color);
         }
         Icon::Loop => {
-            let body = Rect::from_center_size(c, vec2(s * 1.7, s * 1.1));
-            painter.line_segment([body.left_top(), body.right_top()], stroke);
-            painter.line_segment([body.left_top(), pos2(body.left(), c.y)], stroke);
-            painter.line_segment([body.right_top(), pos2(body.right(), c.y)], stroke);
-            painter.line_segment([body.left_bottom(), body.right_bottom()], stroke);
-            painter.line_segment([pos2(body.left(), c.y), body.left_bottom()], stroke);
-            painter.line_segment([pos2(body.right(), c.y), body.right_bottom()], stroke);
-            painter.rect_filled(
-                Rect::from_center_size(c, vec2(s * 0.9, s * 0.35)),
-                0.0,
-                color,
+            let body = Rect::from_center_size(c, vec2(s * 1.9, s * 1.15));
+            let radius = body.height() / 2.0;
+            let half_circle = |center: Pos2, from: f32| -> Vec<Pos2> {
+                (0..=8)
+                    .map(|step| {
+                        let angle = (from + 180.0 * step as f32 / 8.0).to_radians();
+                        center + radius * vec2(angle.cos(), angle.sin())
+                    })
+                    .collect()
+            };
+            let left = pos2(body.left() + radius, c.y);
+            let right = pos2(body.right() - radius, c.y);
+            painter.add(Shape::line(half_circle(right, -90.0), stroke));
+            painter.add(Shape::line(half_circle(left, 90.0), stroke));
+            painter.line_segment(
+                [pos2(left.x, body.top()), pos2(right.x + 0.5, body.top())],
+                stroke,
             );
+            painter.line_segment(
+                [
+                    pos2(left.x - 0.5, body.bottom()),
+                    pos2(right.x, body.bottom()),
+                ],
+                stroke,
+            );
+            let head = (s * 0.45).max(2.5);
+            for (tip, direction) in [
+                (pos2(c.x + head * 0.6, body.top()), 1.0),
+                (pos2(c.x - head * 0.6, body.bottom()), -1.0),
+            ] {
+                painter.add(Shape::convex_polygon(
+                    vec![
+                        tip + vec2(direction * head * 0.7, 0.0),
+                        tip + vec2(-direction * head * 0.5, -head * 0.75),
+                        tip + vec2(-direction * head * 0.5, head * 0.75),
+                    ],
+                    color,
+                    Stroke::NONE,
+                ));
+            }
         }
         Icon::Follow => {
-            let page = Rect::from_center_size(c, vec2(s * 1.5, s * 1.3));
-            painter.rect_stroke(page, 0.0, stroke, StrokeKind::Inside);
+            let page = Rect::from_center_size(c, vec2(s * 1.6, s * 1.3));
+            painter.rect_stroke(page, 1.5, stroke, StrokeKind::Inside);
+            painter.vline(
+                c.x - s * 0.3,
+                (page.top() + 1.5)..=(page.bottom() - 1.5),
+                Stroke::new(1.2, color),
+            );
             let points = vec![
-                pos2(c.x - s * 0.25, c.y - s * 0.4),
-                pos2(c.x + s * 0.35, c.y),
-                pos2(c.x - s * 0.25, c.y + s * 0.4),
+                pos2(c.x - s * 0.05, c.y - s * 0.32),
+                pos2(c.x + s * 0.45, c.y),
+                pos2(c.x - s * 0.05, c.y + s * 0.32),
             ];
             painter.add(Shape::convex_polygon(points, color, Stroke::NONE));
         }
@@ -67,15 +100,17 @@ pub fn icon_button(
     accent: Color32,
     tooltip: &str,
 ) -> Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(26.0, 20.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(TRANSPORT_KEY, Sense::click());
     if ui.is_rect_visible(rect) {
         paint_transport_cap(ui, rect, &response, icon, active.then_some(accent));
     }
     response.on_hover_text(tooltip)
 }
 
+/// A transport key. Play lights its glyph while playing; the other
+/// keys fill with their colour while engaged.
 pub fn transport_button(ui: &mut Ui, icon: Icon, lit: Option<Color32>, tooltip: &str) -> Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(26.0, 20.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(TRANSPORT_KEY, Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::selected(
             egui::WidgetType::Button,
@@ -90,39 +125,121 @@ pub fn transport_button(ui: &mut Ui, icon: Icon, lit: Option<Color32>, tooltip: 
     response.on_hover_text(tooltip)
 }
 
+pub const TRANSPORT_KEY: Vec2 = vec2(30.0, 22.0);
+
+/// Dark ink on light fills, white ink on dark ones, for key legends. The cut sits
+/// above the WCAG midpoint so the blue and red keys keep white legends.
+pub fn ink_on(fill: Color32) -> Color32 {
+    if luminance(fill) > 0.27 {
+        theme::TEXT_ON_COLOR
+    } else {
+        Color32::WHITE
+    }
+}
+
+/// Ink for a name set on a track colour (region strips, name plates): dark across the
+/// palette, so a track's names read alike everywhere, unless the colour is too dark.
+pub fn track_ink(color: Color32) -> Color32 {
+    if luminance(color) > 0.18 {
+        theme::TEXT_ON_COLOR
+    } else {
+        Color32::WHITE
+    }
+}
+
+fn luminance(color: Color32) -> f32 {
+    let linear = egui::Rgba::from(color);
+    0.2126 * linear.r() + 0.7152 * linear.g() + 0.0722 * linear.b()
+}
+
+pub const FIELD_RADIUS: f32 = 3.0;
+const FIELD_RIM: Color32 = Color32::from_black_alpha(190);
+const FIELD_RIM_HOT: Color32 = Color32::from_gray(0x5a);
+
+/// The dark inset field behind a painted value.
+pub fn field(painter: &Painter, rect: Rect, hot: bool) {
+    let (fill, rim) = if hot {
+        (theme::BG_WIDGET_HOVER, FIELD_RIM_HOT)
+    } else {
+        (theme::BG_WIDGET, FIELD_RIM)
+    };
+    painter.rect(
+        rect,
+        FIELD_RADIUS,
+        fill,
+        Stroke::new(1.0, rim),
+        StrokeKind::Inside,
+    );
+}
+
+/// Dresses egui drag values and combo boxes in `style` as [`field`]s.
+pub fn field_visuals(style: &mut Style) {
+    let widgets = &mut style.visuals.widgets;
+    for (state, fill, rim) in [
+        (&mut widgets.inactive, theme::BG_WIDGET, FIELD_RIM),
+        (&mut widgets.hovered, theme::BG_WIDGET_HOVER, FIELD_RIM_HOT),
+        (&mut widgets.active, theme::BG_DEEP, theme::SELECT),
+        (&mut widgets.open, theme::BG_WIDGET_HOVER, FIELD_RIM_HOT),
+    ] {
+        state.bg_fill = fill;
+        state.weak_bg_fill = fill;
+        state.bg_stroke = Stroke::new(1.0, rim);
+        state.corner_radius = CornerRadius::same(FIELD_RADIUS as u8);
+    }
+}
+
 fn paint_transport_cap(ui: &Ui, rect: Rect, response: &Response, icon: Icon, lit: Option<Color32>) {
     let painter = ui.painter();
-    let cap = analog::push_button(
+    let glows = icon == Icon::Play && lit.is_some();
+    let fill = lit.filter(|_| !glows);
+    let cap = analog::key(
         painter,
-        rect.shrink2(vec2(1.0, 1.5)),
-        2.5,
-        lit,
+        rect.shrink2(vec2(1.0, 1.0)),
+        4.0,
+        fill,
         response.hovered(),
-        response.is_pointer_button_down_on(),
+        glows || response.is_pointer_button_down_on(),
     );
-    let glyph = cap.shrink2(vec2(5.0, 3.0));
-    if lit.is_none() {
-        paint_icon(
-            painter,
-            glyph.translate(vec2(0.0, -0.6)),
-            icon,
-            Color32::from_black_alpha(180),
-        );
-    }
-    let color = if lit.is_some() {
-        theme::TEXT_ON_COLOR
-    } else if icon == Icon::Record {
-        theme::ERROR
-    } else if response.hovered() {
-        Color32::WHITE
-    } else {
-        theme::TEXT
+    let glyph = cap.shrink2(vec2(7.0, 4.0));
+    let color = match (lit, fill) {
+        (Some(light), None) => {
+            painter.circle_filled(glyph.center(), glyph.height(), light.gamma_multiply(0.10));
+            light
+        }
+        (Some(_), Some(fill)) => ink_on(fill),
+        (None, _) if icon == Icon::Record => theme::RECORD,
+        (None, _) if response.hovered() => Color32::WHITE,
+        (None, _) => theme::TEXT,
     };
     paint_icon(painter, glyph, icon, color);
 }
 
+/// The legend ink of a key: contrasting while lit, white while hovered.
+pub fn key_ink(light: Option<Color32>, hovered: bool) -> Color32 {
+    match light {
+        Some(light) => ink_on(light),
+        None if hovered => Color32::WHITE,
+        None => theme::TEXT,
+    }
+}
+
 pub fn toggle(ui: &mut Ui, text: &str, on: bool, color: Color32, size: Vec2) -> Response {
-    let font = theme::prop(10.0);
+    toggle_with(ui, text, theme::prop(10.0), on, color, size)
+}
+
+/// A [`toggle`] whose legend is a lone symbol such as ø, drawn larger so it reads.
+pub fn glyph_toggle(ui: &mut Ui, glyph: &str, on: bool, color: Color32, size: Vec2) -> Response {
+    toggle_with(ui, glyph, theme::prop(12.0), on, color, size)
+}
+
+fn toggle_with(
+    ui: &mut Ui,
+    text: &str,
+    font: egui::FontId,
+    on: bool,
+    color: Color32,
+    size: Vec2,
+) -> Response {
     let galley = ui
         .painter()
         .layout_no_wrap(text.to_owned(), font.clone(), theme::TEXT);
@@ -133,36 +250,18 @@ pub fn toggle(ui: &mut Ui, text: &str, on: bool, color: Color32, size: Vec2) -> 
     });
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        let cap = analog::push_button(
+        let cap = analog::key(
             painter,
-            rect.shrink2(vec2(1.0, 1.5)),
-            2.5,
+            rect.shrink2(vec2(1.0, 1.0)),
+            3.5,
             on.then_some(color),
             response.hovered(),
             response.is_pointer_button_down_on(),
         );
-        analog::legend(painter, cap, text, font, on);
+        let ink = key_ink(on.then_some(color), response.hovered());
+        painter.text(cap.center(), Align2::CENTER_CENTER, text, font, ink);
     }
     response
-}
-
-pub fn value_box(ui: &mut Ui, text: &str, width: f32, color: Color32) -> Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(width, 20.0), Sense::click_and_drag());
-    if ui.is_rect_visible(rect) {
-        ui.painter().add(analog::readout(
-            rect,
-            response.hovered() || response.dragged(),
-        ));
-        fitted_text(
-            ui.painter(),
-            rect.shrink2(vec2(4.0, 0.0)),
-            text,
-            theme::mono(11.5),
-            color,
-            Align2::CENTER_CENTER,
-        );
-    }
-    response.on_hover_and_drag_cursor(CursorIcon::ResizeVertical)
 }
 
 pub fn activator(ui: &mut Ui, on: bool) -> Response {
@@ -184,32 +283,37 @@ pub fn activator(ui: &mut Ui, on: bool) -> Response {
     })
 }
 
-pub fn color_bar(painter: &egui::Painter, rect: Rect, color: Color32, text: &str) {
+/// The raised strip behind panel titles.
+pub fn title_bar(painter: &egui::Painter, rect: Rect) {
     analog::gradient_rect(
         painter,
         rect,
-        Color32::from_rgb(0x36, 0x36, 0x36),
-        Color32::from_rgb(0x27, 0x27, 0x27),
+        theme::BG_RAISED,
+        Color32::from_rgb(0x32, 0x32, 0x33),
     );
     painter.hline(
         rect.x_range(),
         rect.top() + 0.5,
-        Stroke::new(1.0, Color32::from_white_alpha(18)),
+        Stroke::new(1.0, Color32::from_white_alpha(16)),
     );
     painter.hline(
         rect.x_range(),
         rect.bottom() - 0.5,
-        Stroke::new(1.0, Color32::from_black_alpha(170)),
+        Stroke::new(1.0, Color32::from_black_alpha(150)),
     );
+}
+
+pub fn color_bar(painter: &egui::Painter, rect: Rect, color: Color32, text: &str) {
+    title_bar(painter, rect);
     let tab = Rect::from_min_size(
         rect.min + vec2(0.0, 1.0),
-        vec2(4.0, (rect.height() - 2.0).max(0.0)),
+        vec2(3.0, (rect.height() - 2.0).max(0.0)),
     );
     painter.rect_filled(tab, 0.0, color);
     fitted_text(
         painter,
         Rect::from_min_max(
-            pos2(tab.right() + 6.0, rect.top()),
+            pos2(tab.right() + 7.0, rect.top()),
             rect.max - vec2(5.0, 0.0),
         ),
         text,
@@ -217,6 +321,213 @@ pub fn color_bar(painter: &egui::Painter, rect: Rect, color: Color32, text: &str
         theme::TEXT,
         Align2::LEFT_CENTER,
     );
+}
+
+/// The playhead's head in a ruler: a small pentagon pointing down at `x`.
+pub fn playhead_head(painter: &Painter, x: f32, top: f32, color: Color32) {
+    painter.add(Shape::convex_polygon(
+        vec![
+            pos2(x - 4.0, top),
+            pos2(x + 4.0, top),
+            pos2(x + 4.0, top + 2.0),
+            pos2(x, top + 6.0),
+            pos2(x - 4.0, top + 2.0),
+        ],
+        color,
+        Stroke::new(1.0, Color32::from_black_alpha(110)),
+    ));
+}
+
+/// A blue focus ring around a text field. egui draws focus with `selection.stroke`,
+/// which also colours selected text, so the ring is painted over it instead.
+pub fn focus_ring(painter: &Painter, rect: Rect, radius: f32) {
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, theme::SELECT),
+        StrokeKind::Inside,
+    );
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(2.0, theme::SELECT.gamma_multiply(0.45)),
+        StrokeKind::Outside,
+    );
+}
+
+/// Paints the [`focus_ring`] around a text edit while it has focus.
+pub fn ring_focus(ui: &Ui, response: &Response) {
+    if response.has_focus() {
+        let radius = ui.style().interact(response).corner_radius.nw;
+        focus_ring(ui.painter(), response.rect, f32::from(radius));
+    }
+}
+
+/// Menu rows that light up blue with white text. Row text starts past a gutter as
+/// wide as a radio button, where [`choice`] puts its tick. Apply it as a popup's
+/// style (`Popup::style`, `ComboBox::popup_style`) rather than through
+/// `ui.style_mut()`, so that submenus inherit it.
+pub fn menu_rows(style: &mut Style) {
+    egui::menu::menu_style(style);
+    let gutter = style.spacing.icon_width + style.spacing.icon_spacing;
+    style.spacing.button_padding = vec2(gutter, 2.0);
+    style.spacing.interact_size.y = 20.0;
+    style.spacing.item_spacing.y = 1.0;
+    style.visuals.weak_text_color = Some(theme::TEXT_DIM);
+    style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, theme::HAIRLINE);
+    menu_highlight(style);
+}
+
+/// The blue highlight of hovered and open menu rows and titles.
+pub fn menu_highlight(style: &mut Style) {
+    // Darkened just enough to keep white text on it legible.
+    let fill = theme::SELECT.lerp_to_gamma(Color32::BLACK, 0.2);
+    let widgets = &mut style.visuals.widgets;
+    widgets.inactive.fg_stroke.color = theme::TEXT;
+    for state in [&mut widgets.hovered, &mut widgets.active, &mut widgets.open] {
+        state.weak_bg_fill = fill;
+        state.bg_fill = fill;
+        state.bg_stroke = Stroke::NONE;
+        state.fg_stroke = Stroke::new(1.0, Color32::WHITE);
+        state.corner_radius = CornerRadius::same(4);
+    }
+}
+
+/// [`menu_rows`] as a style modifier, built once: popups ask for one every frame.
+pub fn menu_style() -> egui::style::StyleModifier {
+    static STYLE: std::sync::LazyLock<egui::style::StyleModifier> =
+        std::sync::LazyLock::new(|| menu_rows.into());
+    STYLE.clone()
+}
+
+/// [`Response::context_menu`] with the app's menu rows.
+pub fn context_menu(
+    response: &Response,
+    add_contents: impl FnOnce(&mut Ui),
+) -> Option<InnerResponse<()>> {
+    egui::Popup::context_menu(response)
+        .style(menu_style())
+        .show(add_contents)
+}
+
+/// A menu row whose current choice carries a tick in the [`menu_rows`] gutter.
+pub fn choice(ui: &mut Ui, enabled: bool, selected: bool, text: &str) -> Response {
+    ticked_row(
+        ui,
+        enabled,
+        selected,
+        text,
+        egui::WidgetType::SelectableLabel,
+    )
+}
+
+/// A [`choice`] among exclusive modes, announced as a radio button.
+pub fn radio_choice(ui: &mut Ui, selected: bool, text: &str) -> Response {
+    ticked_row(ui, true, selected, text, egui::WidgetType::RadioButton)
+}
+
+fn ticked_row(
+    ui: &mut Ui,
+    enabled: bool,
+    selected: bool,
+    text: &str,
+    kind: egui::WidgetType,
+) -> Response {
+    let response = ui.add_enabled(enabled, egui::Button::new(text));
+    response.widget_info(|| egui::WidgetInfo::selected(kind, enabled, selected, text));
+    if selected && ui.is_rect_visible(response.rect) {
+        let ink = ui.style().interact(&response).text_color();
+        let tick = if enabled {
+            ink
+        } else {
+            ui.visuals().disable(ink)
+        };
+        let gutter = ui.spacing().button_padding.x;
+        let center = pos2(
+            response.rect.left() + gutter / 2.0,
+            response.rect.center().y,
+        );
+        ui.painter().add(Shape::line(
+            vec![
+                center + vec2(-3.5, 0.0),
+                center + vec2(-1.0, 2.5),
+                center + vec2(3.5, -3.0),
+            ],
+            Stroke::new(1.5, tick),
+        ));
+    }
+    response
+}
+
+/// [`choice`] for a value, as `Ui::selectable_value`: a click picks `value`, and
+/// the response is marked changed only when that changes `current`.
+pub fn choice_value<T: PartialEq>(ui: &mut Ui, current: &mut T, value: T, text: &str) -> Response {
+    let mut response = choice(ui, true, *current == value, text);
+    if response.clicked() && *current != value {
+        *current = value;
+        response.mark_changed();
+    }
+    response
+}
+
+/// A checkbox that fills blue while ticked.
+pub fn checkbox(ui: &mut Ui, enabled: bool, checked: &mut bool, text: &str) -> Response {
+    let widgets = ui.visuals().widgets.clone();
+    if *checked {
+        blue_tick(&mut ui.visuals_mut().widgets);
+    }
+    let response = ui.add_enabled(enabled, egui::Checkbox::new(checked, text));
+    ui.visuals_mut().widgets = widgets;
+    response
+}
+
+/// Fills a ticked checkbox blue behind a white tick.
+pub fn blue_tick(widgets: &mut egui::style::Widgets) {
+    let lit = theme::SELECT.lerp_to_gamma(Color32::WHITE, 0.15);
+    for (state, fill) in [
+        (&mut widgets.inactive, theme::SELECT),
+        (&mut widgets.hovered, lit),
+        (&mut widgets.active, theme::SELECT),
+    ] {
+        state.bg_fill = fill;
+        state.fg_stroke = Stroke::new(2.0, Color32::WHITE);
+    }
+}
+
+/// Lays keys edge to edge in a shared recess.
+pub fn key_group(ui: &mut Ui, keys: impl FnOnce(&mut Ui)) {
+    let tray = ui.painter().add(Shape::Noop);
+    let group = ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        keys(ui);
+    });
+    let rect = group.response.rect;
+    ui.painter().set(
+        tray,
+        Shape::Vec(vec![
+            Shape::rect_filled(rect, 4.5, Color32::from_black_alpha(80)),
+            Shape::line_segment(
+                [
+                    pos2(rect.left() + 4.0, rect.bottom() + 0.5),
+                    pos2(rect.right() - 4.0, rect.bottom() + 0.5),
+                ],
+                Stroke::new(1.0, Color32::from_white_alpha(9)),
+            ),
+        ]),
+    );
+}
+
+/// A dim caption inside a menu, lined up with the rows past their gutter. Text with
+/// its own colour keeps it.
+pub fn menu_caption(ui: &mut Ui, text: impl Into<egui::WidgetText>) -> Response {
+    let gutter = ui.spacing().button_padding.x;
+    egui::Frame::NONE
+        .inner_margin(egui::Margin::symmetric(gutter as i8, 1))
+        .show(ui, |ui| {
+            ui.visuals_mut().override_text_color = Some(theme::TEXT_DIM);
+            ui.label(text)
+        })
+        .inner
 }
 
 fn arc(painter: &egui::Painter, center: Pos2, radius: f32, from: f32, to: f32, stroke: Stroke) {
@@ -239,7 +550,7 @@ fn paint_knob(painter: &egui::Painter, center: Pos2, radius: f32, value: f32, bi
         radius,
         -KNOB_RANGE,
         KNOB_RANGE,
-        Stroke::new(1.0, Color32::from_black_alpha(150)),
+        Stroke::new(2.0, Color32::from_black_alpha(140)),
     );
     let angle = -KNOB_RANGE + value.clamp(0.0, 1.0) * 2.0 * KNOB_RANGE;
     let origin = if bipolar { 0.0 } else { -KNOB_RANGE };
@@ -251,7 +562,7 @@ fn paint_knob(painter: &egui::Painter, center: Pos2, radius: f32, value: f32, bi
             radius,
             from,
             to,
-            Stroke::new(3.0, theme::ACCENT.gamma_multiply(0.18)),
+            Stroke::new(4.0, theme::ACCENT.gamma_multiply(0.16)),
         );
         arc(
             painter,
@@ -259,7 +570,7 @@ fn paint_knob(painter: &egui::Painter, center: Pos2, radius: f32, value: f32, bi
             radius,
             from,
             to,
-            Stroke::new(1.5, theme::ACCENT),
+            Stroke::new(2.0, theme::ACCENT),
         );
     }
     if bipolar {

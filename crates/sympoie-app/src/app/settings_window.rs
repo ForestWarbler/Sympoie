@@ -6,7 +6,8 @@ use super::SympoieApp;
 use crate::audio::Output;
 use crate::audio::output::{self, AudioCatalog, STANDARD_RATES};
 use crate::settings::{self, AudioSettings, GeneralSettings, Settings};
-use crate::ui::{rack, theme};
+use crate::ui::widgets::{checkbox, choice, key_group};
+use crate::ui::{analog, rack, theme, widgets};
 
 const BUFFER_SIZES: [u32; 8] = [32, 64, 128, 256, 512, 1024, 2048, 4096];
 const LABEL_WIDTH: f32 = 128.0;
@@ -134,24 +135,18 @@ impl SympoieApp {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .default_width(460.0)
             .show(ctx, |ui| {
-                ui.set_width(LABEL_WIDTH + FIELD_WIDTH + 34.0);
                 ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
+                // Rows end with their fields, so every right edge lines up.
+                ui.set_width(LABEL_WIDTH + ui.spacing().item_spacing.x + FIELD_WIDTH);
                 let tabs = [Tab::Audio, Tab::General];
                 let current = tabs
                     .iter()
                     .position(|tab| *tab == self.settings_window.tab)
                     .unwrap_or(0);
-                let chosen = rack::selector_bank(
-                    ui,
-                    &["Audio", "General"],
-                    current,
-                    |_| theme::ACCENT,
-                    |index| Id::new(("settings-tab", index)),
-                );
+                let chosen = page_keys(ui, &["Audio", "General"], current);
                 self.settings_window.tab = tabs[chosen];
-                ui.add_space(4.0);
+                ui.add_space(2.0);
                 match self.settings_window.tab {
                     Tab::Audio => self.audio_tab(ui),
                     Tab::General => self.general_tab(ui),
@@ -188,21 +183,18 @@ impl SympoieApp {
             egui::ComboBox::from_id_salt("settings-driver")
                 .width(FIELD_WIDTH)
                 .selected_text(text)
+                .popup_style(widgets::menu_style())
                 .show_ui(ui, |ui| {
-                    if ui
-                        .selectable_label(draft.driver.is_none(), automatic)
-                        .clicked()
-                    {
+                    if choice(ui, true, draft.driver.is_none(), &automatic).clicked() {
                         draft.driver = None;
                         draft.output_device = None;
                     }
                     for option in &catalog.drivers {
-                        let response = ui.add_enabled(
+                        let response = choice(
+                            ui,
                             option.error.is_none(),
-                            egui::Button::selectable(
-                                draft.driver.as_deref() == Some(option.name.as_str()),
-                                option.name.as_str(),
-                            ),
+                            draft.driver.as_deref() == Some(option.name.as_str()),
+                            &option.name,
                         );
                         let response = match &option.error {
                             Some(error) => response.on_disabled_hover_text(error),
@@ -214,9 +206,6 @@ impl SympoieApp {
                         }
                     }
                 });
-            if discovering {
-                ui.spinner();
-            }
         });
 
         let device = driver.and_then(|driver| driver.device(draft.output_device.as_deref()));
@@ -234,24 +223,17 @@ impl SympoieApp {
                 .width(FIELD_WIDTH)
                 .selected_text(text)
                 .truncate()
+                .popup_style(widgets::menu_style())
                 .show_ui(ui, |ui| {
-                    if ui
-                        .selectable_label(draft.output_device.is_none(), default_name)
-                        .clicked()
-                    {
+                    if choice(ui, true, draft.output_device.is_none(), &default_name).clicked() {
                         draft.output_device = None;
                     }
                     for option in driver
                         .map(|driver| driver.devices.as_slice())
                         .unwrap_or(&[])
                     {
-                        if ui
-                            .selectable_label(
-                                draft.output_device.as_deref() == Some(option.name.as_str()),
-                                option.name.as_str(),
-                            )
-                            .clicked()
-                        {
+                        let chosen = draft.output_device.as_deref() == Some(option.name.as_str());
+                        if choice(ui, true, chosen, &option.name).clicked() {
                             draft.output_device = Some(option.name.clone());
                         }
                     }
@@ -272,18 +254,14 @@ impl SympoieApp {
             egui::ComboBox::from_id_salt("settings-sample-rate")
                 .width(FIELD_WIDTH)
                 .selected_text(text)
+                .popup_style(widgets::menu_style())
                 .show_ui(ui, |ui| {
-                    if ui
-                        .selectable_label(draft.sample_rate.is_none(), current)
-                        .clicked()
-                    {
+                    if choice(ui, true, draft.sample_rate.is_none(), &current).clicked() {
                         draft.sample_rate = None;
                     }
                     for rate in rates {
-                        if ui
-                            .selectable_label(draft.sample_rate == Some(rate), rate_label(rate))
-                            .clicked()
-                        {
+                        let chosen = draft.sample_rate == Some(rate);
+                        if choice(ui, true, chosen, &rate_label(rate)).clicked() {
                             draft.sample_rate = Some(rate);
                         }
                     }
@@ -304,26 +282,17 @@ impl SympoieApp {
             egui::ComboBox::from_id_salt("settings-buffer")
                 .width(FIELD_WIDTH)
                 .selected_text(text)
+                .popup_style(widgets::menu_style())
                 .show_ui(ui, |ui| {
-                    if ui
-                        .selectable_label(draft.buffer_frames.is_none(), "Device default")
-                        .clicked()
-                    {
+                    if choice(ui, true, draft.buffer_frames.is_none(), "Device default").clicked() {
                         draft.buffer_frames = None;
                     }
                     for frames in BUFFER_SIZES {
                         let supported =
                             range.is_none_or(|(min, max)| (min..=max).contains(&frames));
-                        if ui
-                            .add_enabled(
-                                supported,
-                                egui::Button::selectable(
-                                    draft.buffer_frames == Some(frames),
-                                    buffer_label(frames, rate_for_latency),
-                                ),
-                            )
-                            .clicked()
-                        {
+                        let chosen = draft.buffer_frames == Some(frames);
+                        let label = buffer_label(frames, rate_for_latency);
+                        if choice(ui, supported, chosen, &label).clicked() {
                             draft.buffer_frames = Some(frames);
                         }
                     }
@@ -336,13 +305,12 @@ impl SympoieApp {
             egui::ComboBox::from_id_salt("settings-channels")
                 .width(FIELD_WIDTH)
                 .selected_text(pair(draft.first_output_channel))
+                .popup_style(widgets::menu_style())
                 .show_ui(ui, |ui| {
                     let mut first = 0;
                     while first + 1 < channels.max(draft.first_output_channel + 2) {
-                        if ui
-                            .selectable_label(draft.first_output_channel == first, pair(first))
-                            .clicked()
-                        {
+                        let chosen = draft.first_output_channel == first;
+                        if choice(ui, true, chosen, &pair(first)).clicked() {
                             draft.first_output_channel = first;
                         }
                         first += 2;
@@ -363,19 +331,12 @@ impl SympoieApp {
                 self.settings_window.discover(self.use_output_device);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let label = if changed { "Apply" } else { "Restart Audio" };
-                let apply = ui.add(
-                    egui::Button::new(RichText::new(label).color(if changed {
-                        Color32::BLACK
-                    } else {
-                        theme::TEXT
-                    }))
-                    .fill(if changed {
-                        theme::ACCENT
-                    } else {
-                        theme::BG_WIDGET
-                    }),
-                );
+                let apply = ui.add(if changed {
+                    egui::Button::new(RichText::new("Apply").color(Color32::WHITE))
+                        .fill(theme::SELECT)
+                } else {
+                    egui::Button::new("Restart Audio")
+                });
                 ui.interact(
                     apply.rect,
                     Id::new("settings-apply-audio"),
@@ -392,6 +353,9 @@ impl SympoieApp {
                     .clicked()
                 {
                     self.settings_window.draft = self.settings.audio.clone();
+                }
+                if discovering {
+                    ui.spinner();
                 }
             });
         });
@@ -511,7 +475,9 @@ impl SympoieApp {
             }
         });
         row(ui, "Follow playback", |ui| {
-            ui.checkbox(
+            checkbox(
+                ui,
+                true,
                 &mut general.follow_playback,
                 "Keep the play position in view at startup",
             );
@@ -534,7 +500,9 @@ impl SympoieApp {
 
         section(ui, "Plug-ins");
         row(ui, "Startup scan", |ui| {
-            ui.checkbox(
+            checkbox(
+                ui,
+                true,
                 &mut general.scan_plugins_at_startup,
                 "Look for VST3 plug-ins at startup",
             );
@@ -598,6 +566,45 @@ fn input_row(ui: &mut Ui, kind: &str, name: &str, detail: &str) {
     });
 }
 
+/// The window's pages as view keys side by side; the open page is lit blue.
+fn page_keys(ui: &mut Ui, labels: &[&str], selected: usize) -> usize {
+    let mut chosen = selected;
+    let enabled = ui.is_enabled();
+    ui.horizontal(|ui| {
+        key_group(ui, |ui| {
+            for (index, label) in labels.iter().enumerate() {
+                let (rect, _) = ui.allocate_exact_size(vec2(84.0, 22.0), egui::Sense::hover());
+                let response =
+                    ui.interact(rect, Id::new(("settings-tab", index)), egui::Sense::click());
+                if response.clicked() {
+                    chosen = index;
+                }
+                let lit = index == chosen;
+                response.widget_info(|| {
+                    egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, lit, *label)
+                });
+                let cap = analog::key(
+                    ui.painter(),
+                    rect.shrink2(vec2(1.0, 1.0)),
+                    4.0,
+                    lit.then_some(theme::SELECT),
+                    response.hovered(),
+                    response.is_pointer_button_down_on(),
+                );
+                let ink = widgets::key_ink(lit.then_some(theme::SELECT), response.hovered());
+                ui.painter().text(
+                    cap.center(),
+                    egui::Align2::CENTER_CENTER,
+                    *label,
+                    theme::prop(11.0),
+                    ink,
+                );
+            }
+        });
+    });
+    chosen
+}
+
 fn section(ui: &mut Ui, title: &str) {
     ui.add_space(6.0);
     rack::section_label(ui, title);
@@ -607,7 +614,7 @@ fn row(ui: &mut Ui, label: &str, contents: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
         ui.allocate_ui_with_layout(
             vec2(LABEL_WIDTH, 20.0),
-            Layout::left_to_right(Align::Center),
+            Layout::right_to_left(Align::Center),
             |ui| {
                 ui.set_width(LABEL_WIDTH);
                 ui.label(RichText::new(label).color(theme::TEXT_DIM));
@@ -621,10 +628,10 @@ fn status_panel(ui: &mut Ui, contents: impl FnOnce(&mut Ui)) {
     egui::Frame::new()
         .fill(theme::BG_DEEP)
         .stroke(egui::Stroke::new(1.0, theme::BORDER))
-        .corner_radius(3)
-        .inner_margin(8)
+        .corner_radius(5)
+        .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
-            ui.set_width(LABEL_WIDTH + FIELD_WIDTH);
+            ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 2.0;
             contents(ui);
         });

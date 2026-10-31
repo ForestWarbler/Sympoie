@@ -184,8 +184,7 @@ fn overview_pan_updates_the_lane_geometry_in_the_same_frame() {
         + 0.5;
     let marker_x = harness.shapes.iter().find_map(|paint| match &paint.shape {
         Shape::LineSegment { points, stroke }
-            if stroke.color == theme::ACCENT.gamma_multiply(0.65)
-                && points[1].y - points[0].y > 100.0 =>
+            if stroke.color == theme::PLAYHEAD && points[1].y - points[0].y > 100.0 =>
         {
             Some(points[0].x)
         }

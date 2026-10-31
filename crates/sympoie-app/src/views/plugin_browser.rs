@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 
-use eframe::egui::{self, RichText};
+use eframe::egui::{self, Align, Color32, Layout, Rect, RichText, Shape, Stroke, pos2, vec2};
 use sympoie::builtin::BuiltinKind;
 use sympoie::plugin::{PluginDescriptor, PluginKind};
 use sympoie::project::Project;
 
 use crate::actions::Action;
 use crate::plugins::scan::{ScanMode, ScanTask};
-use crate::ui::theme;
+use crate::ui::{theme, widgets};
 
 #[derive(Default)]
 pub struct PluginBrowser {
@@ -169,17 +169,36 @@ impl PluginBrowser {
                     PluginKind::Effect if self.mixer => "Mixer effect",
                     PluginKind::Effect => "effect",
                 };
-                ui.label(format!(
-                    "Load {label} on {}",
-                    project.tracks()[track].name()
-                ));
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.query).hint_text("Search name or vendor"),
+                ui.label(
+                    RichText::new(format!(
+                        "Load {label} on {}",
+                        project.tracks()[track].name()
+                    ))
+                    .font(theme::prop(12.0))
+                    .color(theme::TEXT),
                 );
+                let search = ui.add(
+                    egui::TextEdit::singleline(&mut self.query)
+                        .hint_text("Search name or vendor")
+                        .margin(egui::Margin {
+                            left: 22,
+                            right: 6,
+                            top: 2,
+                            bottom: 2,
+                        })
+                        .desired_width(f32::INFINITY),
+                );
+                widgets::ring_focus(ui, &search);
+                magnifier(ui.painter(), search.rect);
                 if loading {
                     ui.label("Loading plugin…");
                 }
                 let query = self.query.to_lowercase();
+                // Each row centres its Load key on the name and vendor beside it.
+                let row_height = ui.text_style_height(&egui::TextStyle::Body)
+                    + ui.spacing().item_spacing.y
+                    + ui.text_style_height(&egui::TextStyle::Small)
+                    + 8.0;
                 egui::ScrollArea::vertical()
                     .id_salt("vst3-results")
                     .max_height(270.0)
@@ -195,30 +214,50 @@ impl PluginBrowser {
                                 continue;
                             }
                             shown += 1;
-                            ui.horizontal(|ui| {
-                                if ui
-                                    .add_enabled(!loading, egui::Button::new("Load"))
-                                    .clicked()
-                                {
-                                    actions.push(if self.mixer {
-                                        Action::LoadMixerVst3 {
-                                            track, plugin: plugin.clone(), before: None,
-                                        }
-                                    } else {
-                                        Action::LoadVst3 { track, plugin: plugin.clone() }
+                            let backdrop = ui.painter().add(Shape::Noop);
+                            let row = ui.allocate_ui_with_layout(
+                                vec2(ui.available_width(), row_height),
+                                Layout::left_to_right(Align::Center),
+                                |ui| {
+                                    ui.set_min_width(ui.available_width());
+                                    ui.add_space(4.0);
+                                    if ui
+                                        .add_enabled(!loading, egui::Button::new("Load"))
+                                        .clicked()
+                                    {
+                                        actions.push(if self.mixer {
+                                            Action::LoadMixerVst3 {
+                                                track, plugin: plugin.clone(), before: None,
+                                            }
+                                        } else {
+                                            Action::LoadVst3 { track, plugin: plugin.clone() }
+                                        });
+                                    }
+                                    ui.vertical(|ui| {
+                                        // Half the row's 8 px of air, so the pair centres on the key.
+                                        ui.add_space(4.0);
+                                        ui.label(RichText::new(&plugin.name).strong());
+                                        ui.label(
+                                            RichText::new(&plugin.vendor)
+                                                .small()
+                                                .color(theme::TEXT_DIM),
+                                        )
+                                        .on_hover_text(plugin.path.display().to_string());
                                     });
-                                }
-                                ui.vertical(|ui| {
-                                    ui.label(RichText::new(&plugin.name).strong());
-                                    ui.label(
-                                        RichText::new(&plugin.vendor)
-                                            .small()
-                                            .color(theme::TEXT_DIM),
-                                    )
-                                    .on_hover_text(plugin.path.display().to_string());
-                                });
-                            });
-                            ui.separator();
+                                },
+                            );
+                            let rect = row.response.rect;
+                            if ui.rect_contains_pointer(rect) {
+                                ui.painter().set(
+                                    backdrop,
+                                    Shape::rect_filled(rect, 4.0, Color32::from_white_alpha(10)),
+                                );
+                            }
+                            ui.painter().hline(
+                                (rect.left() + 4.0)..=(rect.right() - 4.0),
+                                rect.bottom() + ui.spacing().item_spacing.y / 2.0,
+                                Stroke::new(1.0, theme::HAIRLINE),
+                            );
                         }
                         if shown == 0 && self.scan.is_none() {
                             ui.label(format!("No matching {label}s found."));
@@ -241,6 +280,14 @@ impl PluginBrowser {
             });
         self.open = open;
     }
+}
+
+/// The search field's magnifier, as in the Library.
+fn magnifier(painter: &egui::Painter, field: Rect) {
+    let glass = pos2(field.left() + 11.0, field.center().y - 0.5);
+    let ink = Stroke::new(1.2, theme::TEXT_DIM);
+    painter.circle_stroke(glass, 3.5, ink);
+    painter.line_segment([glass + vec2(2.6, 2.6), glass + vec2(5.2, 5.2)], ink);
 }
 
 #[cfg(test)]

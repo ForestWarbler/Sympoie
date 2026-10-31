@@ -226,7 +226,7 @@ fn output_section(
     let row = Rect::from_min_max(pos2(inner.left(), inner.top() + 14.0), inner.max);
     widgets::inside(ui, row, Layout::left_to_right(Align::Min), |ui| {
         ui.spacing_mut().item_spacing.x = 3.0;
-        let mute = widgets::toggle(ui, "M", mixer.muted(), theme::WARN, vec2(23.0, 20.0))
+        let mute = widgets::toggle(ui, "M", mixer.muted(), theme::MUTE, vec2(23.0, 20.0))
             .on_hover_text("Mute track");
         ui.interact(mute.rect, Id::new(("rack-mute", index)), Sense::hover());
         if mute.clicked() {
@@ -235,7 +235,7 @@ fn output_section(
                 mixer: mixer.with_muted(!mixer.muted()),
             });
         }
-        let solo = widgets::toggle(ui, "S", mixer.soloed(), theme::ACCENT, vec2(23.0, 20.0))
+        let solo = widgets::toggle(ui, "S", mixer.soloed(), theme::SOLO, vec2(23.0, 20.0))
             .on_hover_text("Solo track");
         ui.interact(solo.rect, Id::new(("rack-solo", index)), Sense::hover());
         if solo.clicked() {
@@ -246,6 +246,7 @@ fn output_section(
         }
         ui.add_space(6.0);
         ui.push_id("rack-output", |ui| {
+            widgets::field_visuals(ui.style_mut());
             mixer_controls(ui, project, index, actions);
         });
     });
@@ -300,7 +301,7 @@ fn title_bar(
     painter.rect_filled(
         rect.shrink2(vec2(1.0, 0.0)).with_min_y(rect.top() + 3.0),
         0.0,
-        egui::Color32::from_black_alpha(34),
+        egui::Color32::from_white_alpha(7),
     );
     painter.hline(
         (rect.left() + 1.0)..=(rect.right() - 1.0),
@@ -387,8 +388,17 @@ fn drop_zone(ui: &mut Ui, index: usize, track: &Track) -> Response {
     );
     let painter = ui.painter();
     let slot = rect.shrink(1.0);
-    painter.rect_filled(slot, 3.0, egui::Color32::from_black_alpha(40));
+    painter.rect_filled(slot, 6.0, egui::Color32::from_black_alpha(40));
     let dash = egui::Stroke::new(
+        1.0,
+        if response.hovered() {
+            rack::INK_FAINT
+        } else {
+            theme::HAIRLINE
+        },
+    );
+    rack::dashed_outline(painter, slot, dash);
+    let mark = egui::Stroke::new(
         1.0,
         if response.hovered() {
             rack::INK
@@ -396,25 +406,10 @@ fn drop_zone(ui: &mut Ui, index: usize, track: &Track) -> Response {
             rack::INK_FAINT
         },
     );
-    let corners = [
-        slot.left_top(),
-        slot.right_top(),
-        slot.right_bottom(),
-        slot.left_bottom(),
-        slot.left_top(),
-    ];
-    for pair in corners.windows(2) {
-        painter.extend(egui::Shape::dashed_line(
-            &[pair[0], pair[1]],
-            dash,
-            4.0,
-            3.0,
-        ));
-    }
     let center = slot.center();
     let plus = center - vec2(70.0, 0.0);
-    painter.line_segment([plus - vec2(6.0, 0.0), plus + vec2(6.0, 0.0)], dash);
-    painter.line_segment([plus - vec2(0.0, 6.0), plus + vec2(0.0, 6.0)], dash);
+    painter.line_segment([plus - vec2(6.0, 0.0), plus + vec2(6.0, 0.0)], mark);
+    painter.line_segment([plus - vec2(0.0, 6.0), plus + vec2(0.0, 6.0)], mark);
     rack::print(
         painter,
         plus + vec2(14.0, -1.0),
@@ -513,15 +508,15 @@ fn chain_drop_target(
             .unwrap_or(viewport);
         ui.painter().rect_stroke(
             target,
-            2.0,
-            egui::Stroke::new(2.0, theme::ACCENT),
+            6.0,
+            egui::Stroke::new(2.0, theme::SELECT),
             egui::StrokeKind::Inside,
         );
     } else {
         let y = marker_y.clamp(viewport.top() + 1.0, viewport.bottom() - 1.0);
         ui.painter().line_segment(
             [pos2(end.left(), y), pos2(end.right(), y)],
-            egui::Stroke::new(3.0, theme::ACCENT),
+            egui::Stroke::new(3.0, theme::SELECT),
         );
     }
     if ui.input(|input| input.pointer.any_released()) {
@@ -703,13 +698,18 @@ fn subtractive_panel(
     ui.horizontal(|ui| {
         ui.label(RichText::new("Osc").color(theme::TEXT_DIM));
         egui::ComboBox::from_id_salt(("device-waveform", track))
+            .popup_style(widgets::menu_style())
             .width(70.0)
             .selected_text(waveform_name(settings.waveform))
             .show_ui(ui, |ui| {
                 for waveform in [Waveform::Sine, Waveform::Saw, Waveform::Square] {
-                    if ui
-                        .selectable_value(&mut settings.waveform, waveform, waveform_name(waveform))
-                        .changed()
+                    if widgets::choice_value(
+                        ui,
+                        &mut settings.waveform,
+                        waveform,
+                        waveform_name(waveform),
+                    )
+                    .changed()
                     {
                         edited = Some("waveform");
                     }
@@ -1030,7 +1030,7 @@ fn builtin_card(
                     if builtin_devices::has_panel(kind) && handle.double_clicked() {
                         actions.push(Action::OpenNativeVst3Editor(plugin.id));
                     }
-                    handle.context_menu(|ui| {
+                    widgets::context_menu(&handle, |ui| {
                         let open = if builtin_devices::has_panel(kind) {
                             "Open panel"
                         } else {
@@ -1163,9 +1163,10 @@ fn sidechain_controls(
         .filter(|route| route.source_track < project.tracks().len())
         .map_or("None", |route| labels[route.source_track].as_str());
     let source = egui::ComboBox::from_id_salt(("sidechain-source", plugin.id))
+        .popup_style(widgets::menu_style())
         .selected_text(source_name)
         .show_ui(ui, |ui| {
-            let none = ui.selectable_label(route.is_none(), "None");
+            let none = widgets::choice(ui, true, route.is_none(), "None");
             ui.interact(
                 none.rect,
                 Id::new(("sidechain-source-none", plugin.id)),
@@ -1182,7 +1183,7 @@ fn sidechain_controls(
                     let selected = route
                         .as_ref()
                         .is_some_and(|route| route.source_track == index);
-                    let response = ui.selectable_label(selected, label);
+                    let response = widgets::choice(ui, true, selected, label);
                     ui.interact(
                         response.rect,
                         Id::new(("sidechain-source-option", plugin.id, index)),
@@ -1218,19 +1219,22 @@ fn sidechain_controls(
             );
         ui.add_enabled_ui(!buses.is_empty(), |ui| {
             egui::ComboBox::from_id_salt(("sidechain-bus", plugin.id))
+                .popup_style(widgets::menu_style())
                 .selected_text(selected_bus)
                 .show_ui(ui, |ui| {
                     for bus in buses {
                         let layout = if bus.channels == 1 { "mono" } else { "stereo" };
-                        ui.selectable_value(
+                        widgets::choice_value(
+                            ui,
                             &mut route.bus_index,
                             bus.index,
-                            format!("{} ({layout})", bus.name),
+                            &format!("{} ({layout})", bus.name),
                         );
                     }
                 });
         });
         egui::ComboBox::from_id_salt(("sidechain-tap", plugin.id))
+            .popup_style(widgets::menu_style())
             .selected_text(sidechain_tap_label(route.tap))
             .show_ui(ui, |ui| {
                 for tap in [
@@ -1238,7 +1242,7 @@ fn sidechain_controls(
                     SidechainTap::PostEffects,
                     SidechainTap::PostFader,
                 ] {
-                    ui.selectable_value(&mut route.tap, tap, sidechain_tap_label(tap));
+                    widgets::choice_value(ui, &mut route.tap, tap, sidechain_tap_label(tap));
                 }
             });
         let mut gain = route.gain;
@@ -1598,16 +1602,17 @@ fn instrument_controls(
         .show(ui, |ui| {
             ui.label("Oscillator");
             let waveform = egui::ComboBox::from_id_salt(("synth-waveform", track))
+                .popup_style(widgets::menu_style())
                 .selected_text(waveform_name(settings.waveform))
                 .show_ui(ui, |ui| {
                     for waveform in [Waveform::Sine, Waveform::Saw, Waveform::Square] {
-                        if ui
-                            .selectable_value(
-                                &mut settings.waveform,
-                                waveform,
-                                waveform_name(waveform),
-                            )
-                            .changed()
+                        if widgets::choice_value(
+                            ui,
+                            &mut settings.waveform,
+                            waveform,
+                            waveform_name(waveform),
+                        )
+                        .changed()
                         {
                             edited = Some("waveform");
                         }

@@ -1,5 +1,6 @@
 use eframe::egui::{
-    Color32, Mesh, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, Vec2, pos2, vec2,
+    Color32, Mesh, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, Vec2, emath::GuiRounding, pos2,
+    vec2,
 };
 
 fn rounded_rect_points(rect: Rect, radius: f32) -> Vec<Pos2> {
@@ -112,7 +113,7 @@ pub fn well(painter: &Painter, rect: Rect, radius: f32) {
         painter,
         &outline,
         rect.center(),
-        vertical(rect, Color32::from_gray(0x03), Color32::from_gray(0x12)),
+        vertical(rect, Color32::from_gray(0x0a), Color32::from_gray(0x17)),
     );
     painter.rect_stroke(
         rect.expand(1.0),
@@ -138,19 +139,133 @@ pub fn glass(painter: &Painter, rect: Rect) {
     gradient_rect(
         painter,
         upper.shrink2(vec2(1.0, 0.0)),
-        Color32::from_white_alpha(26),
+        Color32::from_white_alpha(16),
         Color32::from_white_alpha(0),
     );
+}
+
+/// The transport display: a dark glass panel set into the control bar.
+pub fn lcd(painter: &Painter, rect: Rect, radius: f32) {
+    painter.rect_filled(
+        rect.translate(vec2(0.0, 1.0)),
+        radius,
+        Color32::from_white_alpha(16),
+    );
+    let lcd = crate::ui::theme::LCD;
+    fan(
+        painter,
+        &rounded_rect_points(rect, radius),
+        rect.center(),
+        vertical(
+            rect,
+            lcd.lerp_to_gamma(Color32::WHITE, 0.035),
+            lcd.lerp_to_gamma(Color32::BLACK, 0.2),
+        ),
+    );
+    let sheen = Rect::from_min_max(
+        rect.min + vec2(radius, 1.0),
+        pos2(rect.right() - radius, rect.top() + rect.height() * 0.42),
+    );
+    gradient_rect(
+        painter,
+        sheen,
+        Color32::from_white_alpha(9),
+        Color32::from_white_alpha(0),
+    );
+    painter.hline(
+        (rect.left() + radius)..=(rect.right() - radius),
+        rect.top() + 1.5,
+        Stroke::new(1.0, Color32::from_black_alpha(150)),
+    );
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, Color32::from_black_alpha(230)),
+        StrokeKind::Inside,
+    );
+}
+
+/// A key in the studio chrome: a softly lit grey cap
+/// that fills with `light` while engaged. Returns the cap for the caller's glyph.
+///
+/// Device faceplates keep the deeper, tactile [`push_button`].
+pub fn key(
+    painter: &Painter,
+    rect: Rect,
+    radius: f32,
+    light: Option<Color32>,
+    hovered: bool,
+    pressed: bool,
+) -> Rect {
+    // Whole pixels keep the one-pixel rim crisp.
+    let rect = rect.round_to_pixels(painter.pixels_per_point());
+    let cap = if pressed {
+        rect.translate(vec2(0.0, 0.5))
+    } else {
+        rect
+    };
+    if !pressed {
+        painter.rect_filled(
+            rect.translate(vec2(0.0, 1.0)),
+            radius,
+            Color32::from_black_alpha(80),
+        );
+    }
+    let (top, bottom, rim) = match light {
+        Some(light) => {
+            painter.rect_filled(cap.expand(1.5), radius + 1.5, light.gamma_multiply(0.14));
+            (
+                light.lerp_to_gamma(Color32::WHITE, if hovered { 0.34 } else { 0.22 }),
+                light.lerp_to_gamma(Color32::BLACK, if pressed { 0.28 } else { 0.06 }),
+                light.lerp_to_gamma(Color32::BLACK, 0.62),
+            )
+        }
+        None => match (hovered, pressed) {
+            (_, true) => (
+                Color32::from_gray(0x30),
+                Color32::from_gray(0x2b),
+                Color32::from_gray(0x0e),
+            ),
+            (true, false) => (
+                Color32::from_gray(0x5c),
+                Color32::from_gray(0x4a),
+                Color32::from_gray(0x14),
+            ),
+            (false, false) => (
+                Color32::from_gray(0x51),
+                Color32::from_gray(0x40),
+                Color32::from_gray(0x14),
+            ),
+        },
+    };
+    fan(
+        painter,
+        &rounded_rect_points(cap, radius),
+        cap.center(),
+        vertical(cap, top, bottom),
+    );
+    if !pressed {
+        painter.hline(
+            (cap.left() + radius)..=(cap.right() - radius),
+            cap.top() + 1.5,
+            Stroke::new(
+                1.0,
+                Color32::from_white_alpha(if light.is_some() { 64 } else { 26 }),
+            ),
+        );
+    }
+    painter.rect_stroke(cap, radius, Stroke::new(1.0, rim), StrokeKind::Inside);
+    cap
 }
 
 pub fn readout(rect: Rect, highlighted: bool) -> Shape {
     let inner = rect.shrink(1.0);
     let mut glass = Mesh::default();
     for (point, color) in [
-        (inner.left_top(), Color32::from_gray(0x24)),
-        (inner.right_top(), Color32::from_gray(0x24)),
-        (inner.right_bottom(), Color32::from_gray(0x0d)),
-        (inner.left_bottom(), Color32::from_gray(0x0d)),
+        (inner.left_top(), Color32::from_gray(0x25)),
+        (inner.right_top(), Color32::from_gray(0x25)),
+        (inner.right_bottom(), Color32::from_gray(0x12)),
+        (inner.left_bottom(), Color32::from_gray(0x12)),
     ] {
         glass.colored_vertex(point, color);
     }
@@ -436,22 +551,6 @@ pub fn knob_cap(painter: &Painter, center: Pos2, radius: f32, angle: f32, hot: b
         ],
         Stroke::new(1.6, Color32::from_rgb(0xe6, 0xe6, 0xe6)),
     );
-}
-
-pub fn legend(painter: &Painter, rect: Rect, text: &str, font: eframe::egui::FontId, lit: bool) {
-    let align = eframe::egui::Align2::CENTER_CENTER;
-    if lit {
-        painter.text(rect.center(), align, text, font, Color32::from_gray(0x1a));
-    } else {
-        painter.text(
-            rect.center() + vec2(0.0, -0.6),
-            align,
-            text,
-            font.clone(),
-            Color32::from_black_alpha(180),
-        );
-        painter.text(rect.center(), align, text, font, Color32::from_gray(0xd6));
-    }
 }
 
 #[cfg(test)]

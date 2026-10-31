@@ -1,4 +1,4 @@
-use eframe::egui::{self, Align2, Id, Rect, Sense, Stroke, StrokeKind, Ui, pos2};
+use eframe::egui::{self, Align2, Color32, Id, Rect, Sense, Stroke, Ui, pos2};
 use sympoie::track::{AudioInputChannels, AudioRecordingInput, MidiRecordingInput, Track};
 
 use super::Inputs;
@@ -37,25 +37,16 @@ pub(super) fn selector(
         )
     });
     let painter = ui.painter_at(rect);
-    painter.rect_filled(
-        rect,
-        2.0,
-        if enabled && response.hovered() {
-            theme::HEADER_SELECTED
-        } else {
-            theme::BG_PANEL
-        },
-    );
-    painter.rect_stroke(
-        rect,
-        2.0,
-        Stroke::new(0.5, theme::BORDER),
-        StrokeKind::Inside,
-    );
+    let hot = enabled
+        && (response.hovered()
+            || egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response)));
+    widgets::field(&painter, rect, hot);
     let color = if !enabled {
         theme::TEXT_FAINT
     } else if unavailable {
         theme::WARN
+    } else if hot {
+        Color32::WHITE
     } else {
         theme::TEXT
     };
@@ -78,38 +69,40 @@ pub(super) fn selector(
         Stroke::NONE,
     ));
     if enabled {
-        egui::Popup::menu(&response).show(|ui| {
-            ui.set_min_width(220.0);
-            egui::ScrollArea::vertical()
-                .max_height(420.0)
-                .show(ui, |ui| {
-                    match track {
-                        Track::Audio(track) => audio_menu(
-                            ui,
-                            index,
-                            track.recording_input(),
-                            inputs.input_catalog,
-                            actions,
-                        ),
-                        Track::Midi(track) => midi_menu(
-                            ui,
-                            index,
-                            track.recording_input(),
-                            inputs.input_catalog,
-                            actions,
-                        ),
-                        _ => {}
-                    }
-                    ui.separator();
-                    if ui.button("Refresh inputs").clicked() {
-                        actions.push(Action::RefreshRecordingInputs);
-                        ui.close();
-                    }
-                    if let Some(error) = &inputs.input_catalog.error {
-                        ui.label(egui::RichText::new(error).color(theme::WARN));
-                    }
-                });
-        });
+        egui::Popup::menu(&response)
+            .style(widgets::menu_style())
+            .show(|ui| {
+                ui.set_min_width(220.0);
+                egui::ScrollArea::vertical()
+                    .max_height(420.0)
+                    .show(ui, |ui| {
+                        match track {
+                            Track::Audio(track) => audio_menu(
+                                ui,
+                                index,
+                                track.recording_input(),
+                                inputs.input_catalog,
+                                actions,
+                            ),
+                            Track::Midi(track) => midi_menu(
+                                ui,
+                                index,
+                                track.recording_input(),
+                                inputs.input_catalog,
+                                actions,
+                            ),
+                            _ => {}
+                        }
+                        ui.separator();
+                        if ui.button("Refresh inputs").clicked() {
+                            actions.push(Action::RefreshRecordingInputs);
+                            ui.close();
+                        }
+                        if let Some(error) = &inputs.input_catalog.error {
+                            ui.label(egui::RichText::new(error).color(theme::WARN));
+                        }
+                    });
+            });
     } else {
         egui::Popup::close_id(ui.ctx(), egui::Popup::default_response_id(&response));
     }
@@ -224,22 +217,29 @@ fn audio_menu(
     catalog: &InputCatalog,
     actions: &mut Vec<Action>,
 ) {
-    ui.label("Audio input");
+    widgets::menu_caption(ui, "Audio input");
     if input.device.is_some() && selected_audio_device(input, catalog).is_none() {
-        ui.colored_label(theme::WARN, "Selected device unavailable");
+        widgets::menu_caption(
+            ui,
+            egui::RichText::new("Selected device unavailable").color(theme::WARN),
+        );
     }
     let default = catalog.audio.iter().find(|device| device.is_default);
     let label = default.map_or_else(
         || "System default input".to_owned(),
         |device| format!("System default: {}", device.name),
     );
-    if ui.selectable_label(input.device.is_none(), label).clicked() {
+    if widgets::choice(ui, true, input.device.is_none(), &label).clicked() {
         select_audio_device(ui, index, input, None, default, actions);
     }
     for device in &catalog.audio {
-        if ui
-            .selectable_label(input.device.as_ref() == Some(&device.id), &device.name)
-            .clicked()
+        if widgets::choice(
+            ui,
+            true,
+            input.device.as_ref() == Some(&device.id),
+            &device.name,
+        )
+        .clicked()
         {
             select_audio_device(
                 ui,
@@ -252,7 +252,7 @@ fn audio_menu(
         }
     }
     ui.separator();
-    ui.label("Input channels");
+    widgets::menu_caption(ui, "Input channels");
     if let Some(device) = selected_audio_device(input, catalog) {
         for channel in 0..device.channels {
             select_audio_channels(ui, index, input, AudioInputChannels::Mono(channel), actions);
@@ -267,8 +267,11 @@ fn audio_menu(
             );
         }
     } else {
-        ui.label(format!("{} (saved)", audio_channels_label(input.channels)));
-        ui.label("Connect an audio input and refresh inputs.");
+        widgets::menu_caption(
+            ui,
+            format!("{} (saved)", audio_channels_label(input.channels)),
+        );
+        widgets::menu_caption(ui, "Connect an audio input and refresh inputs.");
     }
 }
 
@@ -309,7 +312,12 @@ fn select_audio_channels(
     channels: AudioInputChannels,
     actions: &mut Vec<Action>,
 ) {
-    let response = ui.selectable_label(input.channels == channels, audio_channels_label(channels));
+    let response = widgets::choice(
+        ui,
+        true,
+        input.channels == channels,
+        &audio_channels_label(channels),
+    );
     if response.clicked() {
         if input.channels != channels {
             actions.push(Action::SetAudioRecordingInput {
@@ -334,18 +342,18 @@ fn midi_menu(
     catalog: &InputCatalog,
     actions: &mut Vec<Action>,
 ) {
-    ui.label("MIDI input");
+    widgets::menu_caption(ui, "MIDI input");
     if input
         .device
         .as_ref()
         .is_some_and(|id| !catalog.midi.iter().any(|device| &device.id == id))
     {
-        ui.colored_label(theme::WARN, "Selected port unavailable");
+        widgets::menu_caption(
+            ui,
+            egui::RichText::new("Selected port unavailable").color(theme::WARN),
+        );
     }
-    if ui
-        .selectable_label(input.device.is_none(), "All MIDI inputs")
-        .clicked()
-    {
+    if widgets::choice(ui, true, input.device.is_none(), "All MIDI inputs").clicked() {
         if input.device.is_some() {
             actions.push(Action::SetMidiRecordingInput {
                 track: index,
@@ -358,9 +366,13 @@ fn midi_menu(
         ui.close();
     }
     for device in &catalog.midi {
-        if ui
-            .selectable_label(input.device.as_ref() == Some(&device.id), &device.name)
-            .clicked()
+        if widgets::choice(
+            ui,
+            true,
+            input.device.as_ref() == Some(&device.id),
+            &device.name,
+        )
+        .clicked()
         {
             if input.device.as_ref() != Some(&device.id) {
                 actions.push(Action::SetMidiRecordingInput {
@@ -375,16 +387,13 @@ fn midi_menu(
         }
     }
     ui.separator();
-    ui.label("MIDI channel");
+    widgets::menu_caption(ui, "MIDI channel");
     for channel in std::iter::once(None).chain((0..16).map(Some)) {
         let label = channel.map_or_else(
             || "All channels".to_owned(),
             |channel| format!("Channel {}", channel + 1),
         );
-        if ui
-            .selectable_label(input.channel == channel, label)
-            .clicked()
-        {
+        if widgets::choice(ui, true, input.channel == channel, &label).clicked() {
             if input.channel != channel {
                 actions.push(Action::SetMidiRecordingInput {
                     track: index,
