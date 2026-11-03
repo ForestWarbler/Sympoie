@@ -66,6 +66,7 @@ pub enum Action {
         color: Option<u32>,
     },
     DeleteTrack(usize),
+    DeleteTracks(BTreeSet<usize>),
     MoveTrack {
         track: usize,
         target: TrackDrop,

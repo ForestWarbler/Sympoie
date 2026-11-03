@@ -222,10 +222,19 @@ impl SympoieApp {
                 {
                     actions.push(Action::Ungroup(group));
                 }
-                if item(ui, "Delete Track", String::new(), selected)
-                    && let Some(index) = self.selection.tracks.first()
-                {
-                    actions.push(Action::DeleteTrack(*index));
+                let deletable = self.selection.deletable_tracks();
+                let label = if deletable.len() > 1 {
+                    format!("Delete {} Tracks", deletable.len())
+                } else {
+                    "Delete Track".to_owned()
+                };
+                let keys = if range || clip.is_some() {
+                    String::new()
+                } else {
+                    "Del".to_owned()
+                };
+                if item(ui, &label, keys, !deletable.is_empty()) {
+                    actions.push(Action::DeleteTracks(deletable));
                 }
             });
             menu_title(ui, "Create", |ui| {

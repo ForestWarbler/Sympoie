@@ -209,6 +209,11 @@ impl SympoieApp {
             } else if let Some(clip) = clip.filter(|_| !self.arrangement.automation) {
                 keys.push((Key::Delete, Action::DeleteClip(clip)));
                 keys.push((Key::Backspace, Action::DeleteClip(clip)));
+            } else if !self.arrangement.automation && !self.selection.deletable_tracks().is_empty()
+            {
+                let tracks = self.selection.deletable_tracks();
+                keys.push((Key::Delete, Action::DeleteTracks(tracks.clone())));
+                keys.push((Key::Backspace, Action::DeleteTracks(tracks)));
             }
         }
         for (key, action) in keys {

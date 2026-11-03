@@ -33,6 +33,8 @@ mod builtin_devices;
 
 mod rack_visibility;
 
+mod track_selection;
+
 mod export;
 
 struct Harness {

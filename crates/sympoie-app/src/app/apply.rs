@@ -246,8 +246,16 @@ impl SympoieApp {
                 });
             }
             Action::DeleteTrack(index) => {
+                self.apply(ctx, Action::DeleteTracks(BTreeSet::from([index])))
+            }
+            Action::DeleteTracks(tracks) => {
+                let label = if tracks.len() > 1 {
+                    "Delete Tracks"
+                } else {
+                    "Delete Track"
+                };
                 if self
-                    .edit_structural("Delete Track", |project| edit::delete_track(project, index))
+                    .edit_structural(label, |project| edit::delete_tracks(project, &tracks))
                     .is_some()
                 {
                     self.selection = Selection::default();

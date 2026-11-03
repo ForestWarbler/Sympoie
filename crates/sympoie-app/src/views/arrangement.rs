@@ -2395,7 +2395,7 @@ fn track_header(
     if background.double_clicked() {
         open_track_devices(row.index, actions);
     } else if background.clicked() {
-        select_header(ui, row.index, inputs.selection, actions);
+        select_header(ui, row.index, project, inputs.selection, state, actions);
     }
     widgets::context_menu(&background, |ui| {
         track_menu(ui, project, row.index, inputs.selection, state, actions)
@@ -2501,7 +2501,7 @@ fn track_header(
         if name.double_clicked() {
             open_track_devices(row.index, actions);
         } else if name.clicked() {
-            select_header(ui, row.index, inputs.selection, actions);
+            select_header(ui, row.index, project, inputs.selection, state, actions);
         }
         widgets::context_menu(&name, |ui| {
             track_menu(ui, project, row.index, inputs.selection, state, actions)
@@ -2780,19 +2780,68 @@ fn header_meter(
     .on_hover_text(format!("{name} · output after effects, volume and pan"));
 }
 
-fn select_header(ui: &Ui, index: usize, selection: &Selection, actions: &mut Vec<Action>) {
+fn select_header(
+    ui: &Ui,
+    index: usize,
+    project: &Project,
+    selection: &Selection,
+    state: &mut ArrangementState,
+    actions: &mut Vec<Action>,
+) {
     let modifiers = ui.input(|i| i.modifiers);
-    let mut tracks = selection.tracks.clone();
-    tracks.remove(&0);
-    if modifiers.shift || modifiers.command {
+    let tracks = header_selection(
+        project,
+        selection,
+        state,
+        index,
+        modifiers.shift,
+        modifiers.command,
+    );
+    actions.push(Action::SelectClip(None));
+    actions.push(Action::SelectTracks(tracks));
+}
+
+/// The tracks a header click selects. A plain click selects just `index`,
+/// command toggles it, and shift selects the visible rows from the anchor
+/// (the last plain or command click) to `index`. Clicks other than shift
+/// move the anchor to `index`.
+fn header_selection(
+    project: &Project,
+    selection: &Selection,
+    state: &mut ArrangementState,
+    index: usize,
+    shift: bool,
+    command: bool,
+) -> BTreeSet<usize> {
+    let mut tracks = selection.deletable_tracks();
+    let display: Vec<usize> = rows::display_rows(project, &state.folded)
+        .iter()
+        .map(|row| row.index)
+        .filter(|track| *track != 0)
+        .collect();
+    let position = |track: usize| display.iter().position(|row| *row == track);
+    if shift {
+        // A stale anchor (the selection changed elsewhere since) falls back
+        // to the first selected track.
+        let anchor = state
+            .track_anchor
+            .filter(|anchor| tracks.contains(anchor))
+            .or_else(|| tracks.first().copied())
+            .and_then(position);
+        if let (Some(anchor), Some(clicked)) = (anchor, position(index)) {
+            let (from, to) = (anchor.min(clicked), anchor.max(clicked));
+            return display[from..=to].iter().copied().collect();
+        }
+    }
+    state.track_anchor = Some(index);
+    if command {
         if !tracks.remove(&index) {
             tracks.insert(index);
         }
+        tracks
     } else {
-        tracks = BTreeSet::from([index]);
+        BTreeSet::from([index])
     }
-    actions.push(Action::SelectClip(None));
-    actions.push(Action::SelectTracks(tracks));
 }
 
 fn fold_button(ui: &mut Ui, rect: Rect, index: usize, folded: bool) -> Response {
@@ -2900,16 +2949,23 @@ fn track_menu(
         }
     }
     ui.separator();
-    let delete = if matches!(project.tracks()[index], Track::Group(_)) {
-        "Delete Group and Members"
+    let targets = if selection.tracks.contains(&index) {
+        selection.deletable_tracks()
     } else {
-        "Delete"
+        BTreeSet::from([index])
+    };
+    let delete = if targets.len() > 1 {
+        format!("Delete {} Tracks", targets.len())
+    } else if matches!(project.tracks()[index], Track::Group(_)) {
+        "Delete Group and Members".to_owned()
+    } else {
+        "Delete".to_owned()
     };
     if ui
         .button(RichText::new(delete).color(theme::ERROR))
         .clicked()
     {
-        actions.push(Action::DeleteTrack(index));
+        actions.push(Action::DeleteTracks(targets));
     }
 }
 

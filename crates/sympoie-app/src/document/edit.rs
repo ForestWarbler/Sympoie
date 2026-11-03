@@ -317,6 +317,30 @@ pub fn insert_mixer_plugin(
     Ok(id)
 }
 
+/// Deletes every listed track (groups with their members) as one edit,
+/// returning how many tracks were removed.
+pub fn delete_tracks(project: &mut Project, indices: &BTreeSet<usize>) -> EditResult<usize> {
+    if indices.is_empty() {
+        return Err("no tracks are selected".to_owned());
+    }
+    if indices.contains(&0) {
+        return Err("the master track cannot be deleted".to_owned());
+    }
+    let ids = indices
+        .iter()
+        .map(|index| track_id(project, *index))
+        .collect::<EditResult<Vec<_>>>()?;
+    let mut removed = 0;
+    for id in ids.into_iter().rev() {
+        // A track may already be gone as a member of a deleted group.
+        let index = project.track_ids().position(|track| track == id);
+        if let Some(index) = index {
+            removed += delete_track(project, index)?;
+        }
+    }
+    Ok(removed)
+}
+
 pub fn delete_track(project: &mut Project, index: usize) -> EditResult<usize> {
     if index == 0 {
         return Err("the master track cannot be deleted".to_owned());
@@ -1778,6 +1802,29 @@ mod tests {
         assert_eq!(removed, 3);
         assert_eq!(project.tracks().len(), 1);
         assert!(delete_track(&mut project, 0).is_err());
+    }
+
+    #[test]
+    fn deleting_several_tracks_handles_groups_with_their_selected_members() {
+        let mut project = Project::new();
+        let keep = add_track(&mut project, TrackKind::Audio, None);
+        let member = add_track(&mut project, TrackKind::Audio, None);
+        let other = add_track(&mut project, TrackKind::Midi, None);
+        let group = group_tracks(&mut project, &[member, other]).unwrap();
+        let last = add_track(&mut project, TrackKind::Audio, None);
+        let keep_id = track_id(&project, keep).unwrap();
+        let member = rows::children(&project)[group][0];
+        let count = project.tracks().len();
+
+        let removed = delete_tracks(&mut project, &BTreeSet::from([group, member, last])).unwrap();
+        assert_eq!(removed, 4);
+        assert_eq!(project.tracks().len(), count - 4);
+        assert_eq!(project.track_ids().collect::<Vec<_>>()[1], keep_id);
+
+        assert!(delete_tracks(&mut project, &BTreeSet::new()).is_err());
+        assert!(delete_tracks(&mut project, &BTreeSet::from([0, keep])).is_err());
+        assert!(delete_tracks(&mut project, &BTreeSet::from([99])).is_err());
+        assert_eq!(project.tracks().len(), 2);
     }
 
     #[test]

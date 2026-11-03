@@ -43,6 +43,15 @@ impl Selection {
         }
     }
 
+    /// The selected tracks a delete applies to: everything but the master.
+    pub fn deletable_tracks(&self) -> BTreeSet<usize> {
+        self.tracks
+            .iter()
+            .copied()
+            .filter(|track| *track != 0)
+            .collect()
+    }
+
     pub fn validate(&mut self, project: &Project) {
         let count = project.tracks().len();
         self.tracks.retain(|index| *index < count);
@@ -196,6 +205,9 @@ pub struct ArrangementState {
     pub grid: GridMode,
     pub automation: bool,
     pub automation_targets: HashMap<usize, AutomationTarget>,
+    /// The track a shift-click range extends from: the last header plainly
+    /// or command-clicked.
+    pub track_anchor: Option<usize>,
 }
 
 impl Default for ArrangementState {
@@ -214,6 +226,7 @@ impl Default for ArrangementState {
             grid: GridMode::default(),
             automation: false,
             automation_targets: HashMap::new(),
+            track_anchor: None,
         }
     }
 }
